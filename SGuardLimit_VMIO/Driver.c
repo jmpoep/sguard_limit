@@ -1,16 +1,17 @@
-// Memory Patch£¨ÄÚºËÌ¬Ä£¿é£©
-// ÌØ±ğ¸ĞĞ»: Zer0Mem0ry BlackBone
+ï»¿// Memory Patchï¼ˆå†…æ ¸æ€æ¨¡å—ï¼‰
+// ç‰¹åˆ«æ„Ÿè°¢: Zer0Mem0ry BlackBone
 #include <ntdef.h>
 #include <ntifs.h>
 #include <intrin.h>
 #include <ntimage.h>
+#include <ntstrsafe.h>
 
 #include "Vad.h"
 
-#define DRIVER_VERSION  "24.10.26"
+#define DRIVER_VERSION  "26.5.17"
 
 
-// È«¾Ö¶ÔÏó
+// å…¨å±€å¯¹è±¡
 RTL_OSVERSIONINFOW   OSVersion;
 UNICODE_STRING       dev, dos;
 PDEVICE_OBJECT       pDeviceObject;
@@ -19,7 +20,7 @@ wchar_t              TargetImageName[256];
 PVOID                TargetVad;
 
 
-// I/OÊÂ¼şºÍ»º³åÇø½á¹¹
+// I/Oäº‹ä»¶å’Œç¼“å†²åŒºç»“æ„
 #define VMIO_VERSION   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x0700, METHOD_BUFFERED, FILE_SPECIAL_ACCESS)
 #define VMIO_READ      CTL_CODE(FILE_DEVICE_UNKNOWN, 0x0701, METHOD_BUFFERED, FILE_SPECIAL_ACCESS)
 #define VMIO_WRITE     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x0702, METHOD_BUFFERED, FILE_SPECIAL_ACCESS)
@@ -37,11 +38,11 @@ typedef struct {
 	CHAR     data[0x1000];
 
 	ULONG    errorCode;
-	CHAR     errorFunc[128];
+	CHAR     errorFunc[256];
 } VMIO_REQUEST;
 
 
-// windowsÎ´¹«¿ªµÄ½á¹¹
+// windowsæœªå…¬å¼€çš„ç»“æ„
 typedef enum _SYSTEM_INFORMATION_CLASS {
 	SystemModuleInformation = 0x0B,
 } SYSTEM_INFORMATION_CLASS;
@@ -64,14 +65,14 @@ typedef struct _RTL_PROCESS_MODULES {
 	RTL_PROCESS_MODULE_INFORMATION Modules[ANYSIZE_ARRAY]; // evil hack
 } RTL_PROCESS_MODULES;
 
-// ZwQuerySystemInformation (Î´ÉùÃ÷)
+// ZwQuerySystemInformation (æœªå£°æ˜)
 NTSTATUS ZwQuerySystemInformation(
 	SYSTEM_INFORMATION_CLASS SystemInformationClass,
 	PVOID SystemInformation,
 	ULONG SystemInformationLength,
 	ULONG* ReturnLength);
 
-// ZwProtectVirtualMemory (win7/win8Î´µ¼³ö)
+// ZwProtectVirtualMemory (win7/win8æœªå¯¼å‡º)
 NTSTATUS (NTAPI* ZwProtectVirtualMemory)(
 	__in HANDLE ProcessHandle,
 	__inout PVOID* BaseAddress,
@@ -80,7 +81,7 @@ NTSTATUS (NTAPI* ZwProtectVirtualMemory)(
 	__out PULONG OldProtect
 ) = NULL;
 
-// MmCopyVirtualMemory (Î´ÉùÃ÷)
+// MmCopyVirtualMemory (æœªå£°æ˜)
 NTSTATUS NTAPI MmCopyVirtualMemory(
 	PEPROCESS SourceProcess,
 	PVOID SourceAddress,
@@ -90,22 +91,22 @@ NTSTATUS NTAPI MmCopyVirtualMemory(
 	KPROCESSOR_MODE PreviousMode,
 	PSIZE_T ReturnSize);
 
-// PsSuspend/ResumeProcess (ÒÑµ¼³ö·ûºÅ)
+// PsSuspend/ResumeProcess (å·²å¯¼å‡ºç¬¦å·)
 NTKERNELAPI NTSTATUS PsSuspendProcess(PEPROCESS Process);
 NTKERNELAPI NTSTATUS PsResumeProcess(PEPROCESS Process);
 
 
-// °ü×°Æ÷
+// åŒ…è£…å™¨
 NTSTATUS KeReadVirtualMemory(PEPROCESS Process, PVOID SourceAddress, PVOID TargetAddress, SIZE_T Size) {
 
 	if ((LONG64)SourceAddress < 0) {
 		return STATUS_ACCESS_DENIED;
 	}
 
-	// ´Ë´¦MmCopyVirtualMemory½öÓÃÓÚ¶ÁÈ¡Ä¿±êÓÃ»§¿Õ¼äµÄĞéÄâÄÚ´æ¡£
-	// ¾¡¹ÜMmCopyVirtualMemoryÒ²¿ÉÒÔ¿½±´ÄÚºË¿Õ¼äµÄ·ÖÒ³ÄÚ´æ£¬µ«Èô´¥Åöµ½ÄÚºË·Ç·ÖÒ³ÇøÓò»òÎŞÒ³±íÓ³ÉäÇøÓò£¬
-	// ÓÉÓÚ¶ÔÓ¦µÄÄÚºËÒ³±íÏî²»´æÔÚ£¬´¥·¢ÄÚºËÌ¬page faultºóÈ±Ò³ÖĞ¶ÏÎŞ·¨´¦Àí£¬ntos»á½«Ö®ÅĞ¶¨ÎªÑÏÖØ´íÎó£¬Èô²»²¶»ñÒì³£½«BSOD¡£
-	// ÏàÓ¦µÄ£¬Èô´¥·¢ÁËÓÃ»§Ì¬page fault£¬¼´Ê¹ÎŞ·¨½â¾öÈ±Ò³£¬Ò²Ö»ÊÇMmCopyVirtualMemory·µ»ØÊ§°Ü¶øÒÑ¡£
+	// æ­¤å¤„MmCopyVirtualMemoryä»…ç”¨äºè¯»å–ç›®æ ‡ç”¨æˆ·ç©ºé—´çš„è™šæ‹Ÿå†…å­˜ã€‚
+	// å°½ç®¡MmCopyVirtualMemoryä¹Ÿå¯ä»¥æ‹·è´å†…æ ¸ç©ºé—´çš„åˆ†é¡µå†…å­˜ï¼Œä½†è‹¥è§¦ç¢°åˆ°å†…æ ¸éåˆ†é¡µåŒºåŸŸæˆ–æ— é¡µè¡¨æ˜ å°„åŒºåŸŸï¼Œ
+	// ç”±äºå¯¹åº”çš„å†…æ ¸é¡µè¡¨é¡¹ä¸å­˜åœ¨ï¼Œè§¦å‘å†…æ ¸æ€page faultåç¼ºé¡µä¸­æ–­æ— æ³•å¤„ç†ï¼Œntosä¼šå°†ä¹‹åˆ¤å®šä¸ºä¸¥é‡é”™è¯¯ï¼Œè‹¥ä¸æ•è·å¼‚å¸¸å°†BSODã€‚
+	// ç›¸åº”çš„ï¼Œè‹¥è§¦å‘äº†ç”¨æˆ·æ€page faultï¼Œå³ä½¿æ— æ³•è§£å†³ç¼ºé¡µï¼Œä¹Ÿåªæ˜¯MmCopyVirtualMemoryè¿”å›å¤±è´¥è€Œå·²ã€‚
 
 	SIZE_T Bytes;
 	return MmCopyVirtualMemory(Process, SourceAddress, PsGetCurrentProcess(), TargetAddress, Size, KernelMode, &Bytes);
@@ -122,7 +123,7 @@ NTSTATUS KeWriteVirtualMemory(PEPROCESS Process, PVOID SourceAddress, PVOID Targ
 }
 
 
-// ÄÚºËÌ¬Ä£¿éËÑË÷
+// å†…æ ¸æ€æ¨¡å—æœç´¢
 typedef struct {
 	BOOLEAN          Found;
 	ULONG64          VirtualAddress[2];
@@ -133,18 +134,18 @@ void SearchVad_NT61(PSEARCH_RESULT result, PMMVAD_7 pVad) { // assert: pVad != N
 	result->Found = FALSE;
 
 
-	// Èôµ±Ç°Vad½ÚµãÀàĞÍÎªImageMap
-	// ÓÉÓÚpVadÓĞĞ§£¬¹ÊpVadÖ¸ÏòµÄ½á¹¹ÓĞĞ§£¬ËùÒÔVadTypeÊ¼ÖÕÎ»ÓÚºÏ·¨µÄÄÚ´æ£¨½ö½âÒ»´ÎÒıÓÃ£©¡£
+	// è‹¥å½“å‰VadèŠ‚ç‚¹ç±»å‹ä¸ºImageMap
+	// ç”±äºpVadæœ‰æ•ˆï¼Œæ•…pVadæŒ‡å‘çš„ç»“æ„æœ‰æ•ˆï¼Œæ‰€ä»¥VadTypeå§‹ç»ˆä½äºåˆæ³•çš„å†…å­˜ï¼ˆä»…è§£ä¸€æ¬¡å¼•ç”¨ï¼‰ã€‚
 	if (pVad->u.VadFlags.VadType == VadImageMap) {
 
-		// Èôµ±Ç°½ÚµãµÄFileObject´æÔÚ
+		// è‹¥å½“å‰èŠ‚ç‚¹çš„FileObjectå­˜åœ¨
 		if (pVad->Subsection && pVad->Subsection->ControlArea && pVad->Subsection->ControlArea->FilePointer.Object) {
 
-			// È¡µÃµ±Ç°½Úµã¶ÔÓ¦µÄÓ³ÏñÂ·¾¶
+			// å–å¾—å½“å‰èŠ‚ç‚¹å¯¹åº”çš„æ˜ åƒè·¯å¾„
 			PFILE_OBJECT pFileObj = (PFILE_OBJECT)(pVad->Subsection->ControlArea->FilePointer.Value & ~0xf);
 			PUNICODE_STRING pImagePath = &pFileObj->FileName;
 
-			// ´ÓÂ·¾¶ÖĞ»ñÈ¡Ó³ÏñÃû³Æ
+			// ä»è·¯å¾„ä¸­è·å–æ˜ åƒåç§°
 			USHORT imageIndex = -1;
 			for (USHORT i = 0; i < pImagePath->Length / 2; i++) {
 				if (pImagePath->Buffer[i] == L'\\') {
@@ -155,7 +156,7 @@ void SearchVad_NT61(PSEARCH_RESULT result, PMMVAD_7 pVad) { // assert: pVad != N
 
 			if (imageIndex != 0) {
 
-				// ÈôÓ³ÏñÃû³Æ´æÔÚ£¬Ôò¹¹ÔìÎª×Ö·û´®ÒÔ¹©¶Ô±È
+				// è‹¥æ˜ åƒåç§°å­˜åœ¨ï¼Œåˆ™æ„é€ ä¸ºå­—ç¬¦ä¸²ä»¥ä¾›å¯¹æ¯”
 				wchar_t* pImageName = ExAllocatePoolWithTag(NonPagedPool, 512, '9d3H');
 
 				if (pImageName) {
@@ -165,10 +166,10 @@ void SearchVad_NT61(PSEARCH_RESULT result, PMMVAD_7 pVad) { // assert: pVad != N
 						pImageName[i] = pImagePath->Buffer[imageIndex];
 					}
 
-					// ¶Ô±ÈÓ³ÏñÃû³ÆÊÇ·ñÓë´ı²éÑ¯µÄÒ»ÖÂ
+					// å¯¹æ¯”æ˜ åƒåç§°æ˜¯å¦ä¸å¾…æŸ¥è¯¢çš„ä¸€è‡´
 					if (0 == _wcsicmp(pImageName, TargetImageName)) {
 
-						// ÈôÒ»ÖÂ£¬ÔòÈ¡¸ÃÄÚ´æ¾µÏñµÄĞéÄâµØÖ··¶Î§Îª½á¹û
+						// è‹¥ä¸€è‡´ï¼Œåˆ™å–è¯¥å†…å­˜é•œåƒçš„è™šæ‹Ÿåœ°å€èŒƒå›´ä¸ºç»“æœ
 						result->Found = TRUE;
 						result->VirtualAddress[0] = pVad->StartingVpn << 12;
 						result->VirtualAddress[1] = pVad->EndingVpn << 12;
@@ -257,20 +258,30 @@ void SearchVad_NT10(PSEARCH_RESULT result, PMMVAD_10 pVad) { // assert: pVad != 
 	result->Found = FALSE;
 
 
-	// [note] NT10ĞèÒªÒÀ¾İBuildNumberÇø·ÖVadTypeµÄÆ«ÒÆ
-	// Èç¹ûÊÇNT6.3£¬Í¬ÑùÂú×ã9600 <= 17763¡£
+	// [note] NT10çš„pVad->Coreåç§»é‡ä¸€è‡´ï¼›
+	// ä½†éœ€è¦ä¾æ®BuildNumberåŒºåˆ†pVad->Core.u.VadFlags.VadTypeå’ŒpVad->Subsectionçš„åç§»
+	// å¦‚æœæ˜¯NT6.3ï¼ŒåŒæ ·æ»¡è¶³9600 <= 17763ã€‚
 	ULONG VadType;
-	if (OSVersion.dwBuildNumber <= 17763) {
+	if (OSVersion.dwBuildNumber <= 17763) {  // [7600, 17763]
 		VadType = pVad->Core.u.VadFlags._17763.VadType;
-	} else {
+	} else if (OSVersion.dwBuildNumber < 28000) {  // (17763, 28000)
 		VadType = pVad->Core.u.VadFlags._18362.VadType;
+	} else {  // [28000, ..)
+		VadType = pVad->Core.u.VadFlags._28000.VadType;
 	}
 
 	if (VadType == VadImageMap) {
 
-		if (pVad->Subsection && pVad->Subsection->ControlArea && pVad->Subsection->ControlArea->FilePointer.Object) {
+		PSUBSECTION pSubsection;
+		if (OSVersion.dwBuildNumber < 28000) {
+			pSubsection = ((PMMVAD_10)pVad)->Subsection;
+		} else {
+			pSubsection = ((PMMVAD_10_28000)pVad)->Subsection;
+		}
 
-			PFILE_OBJECT pFileObj = (PFILE_OBJECT)(pVad->Subsection->ControlArea->FilePointer.Value & ~0xf);
+		if (pSubsection && pSubsection->ControlArea && pSubsection->ControlArea->FilePointer.Object) {
+
+			PFILE_OBJECT pFileObj = (PFILE_OBJECT)(pSubsection->ControlArea->FilePointer.Value & ~0xf);
 			PUNICODE_STRING pImagePath = &pFileObj->FileName;
 
 			USHORT imageIndex = -1;
@@ -295,8 +306,8 @@ void SearchVad_NT10(PSEARCH_RESULT result, PMMVAD_10 pVad) { // assert: pVad != 
 					if (0 == _wcsicmp(pImageName, TargetImageName)) {
 
 						result->Found = TRUE;
-						// [note] NT6.3ºÍºóĞøµÄNT10Ê¹ÓÃ¶îÍâµÄ×Ö½Ú±íÊ¾µÚ44~47Î»ĞéÄâµØÖ·£¬ÇÒVpn×Ö¶ÎÎª32Î»¡£
-						// ¶øNT6.1µÄVpn×Ö¶ÎÎª64Î»£¬µ«½öÊ¹ÓÃÁËµÍ32Î»£¬ËüµÄ44~47Î»ĞéÄâµØÖ·´ÓÎ´±»Ê¹ÓÃ¡£
+						// [note] NT6.3å’Œåç»­çš„NT10ä½¿ç”¨é¢å¤–çš„å­—èŠ‚è¡¨ç¤ºç¬¬44~47ä½è™šæ‹Ÿåœ°å€ï¼Œä¸”Vpnå­—æ®µä¸º32ä½ã€‚
+						// è€ŒNT6.1çš„Vpnå­—æ®µä¸º64ä½ï¼Œä½†ä»…ä½¿ç”¨äº†ä½32ä½ï¼Œå®ƒçš„44~47ä½è™šæ‹Ÿåœ°å€ä»æœªè¢«ä½¿ç”¨ã€‚
 						result->VirtualAddress[0] = ((ULONG64)pVad->Core.StartingVpnHigh << 44) | ((ULONG64)pVad->Core.StartingVpn << 12);
 						result->VirtualAddress[1] = ((ULONG64)pVad->Core.EndingVpnHigh << 44) | ((ULONG64)pVad->Core.EndingVpn << 12);
 						
@@ -305,9 +316,14 @@ void SearchVad_NT10(PSEARCH_RESULT result, PMMVAD_10 pVad) { // assert: pVad != 
 								pVad->Core.u.VadFlags._17763.NoChange = 0;
 								TargetVad = pVad;
 							}
-						} else {
+						} else if (OSVersion.dwBuildNumber < 28000) {
 							if (pVad->Core.u.VadFlags._18362.NoChange == 1) {
 								pVad->Core.u.VadFlags._18362.NoChange = 0;
+								TargetVad = pVad;
+							}
+						} else {
+							if (pVad->Core.u.VadFlags._28000.NoChange == 1) {
+								pVad->Core.u.VadFlags._28000.NoChange = 0;
 								TargetVad = pVad;
 							}
 						}
@@ -329,7 +345,7 @@ void SearchVad_NT10(PSEARCH_RESULT result, PMMVAD_10 pVad) { // assert: pVad != 
 }
 
 
-// Ä£Ê½Æ¥Åä
+// æ¨¡å¼åŒ¹é…
 ULONG64 match_pattern(ULONG64 pstart, size_t size, const char* pattern, const char* mask) {
 
 	size_t i, j, patternLen = strlen(mask); // pattern may have '\x00'
@@ -384,7 +400,7 @@ ULONG64 match_pattern_image(ULONG64 imgbase, const char* secname, const char* pa
 }
 
 
-// asmÌø°å
+// asmè·³æ¿
 extern void DetourMain();
 PVOID pOriginal = DetourMain;
 PVOID expectedCip = NULL;
@@ -428,7 +444,7 @@ NTSTATUS IronCurtain(PVOID object) {
 }
 
 
-// ¸÷ÖÖ»Øµ÷º¯Êı
+// å„ç§å›è°ƒå‡½æ•°
 NTSTATUS CreateOrClose(PDEVICE_OBJECT DeviceObject, PIRP irp) {
 
 	irp->IoStatus.Status = STATUS_SUCCESS;
@@ -442,7 +458,7 @@ NTSTATUS CreateOrClose(PDEVICE_OBJECT DeviceObject, PIRP irp) {
 #define IOCTL_LOG_EXIT(errorName)  if (hProcess) ZwClose(hProcess); \
                                    if (pEProcess) ObDereferenceObject(pEProcess); \
                                    Input->errorCode = RtlNtStatusToDosError(Status); \
-                                   memcpy(Input->errorFunc, errorName, sizeof(errorName)); \
+                                   RtlStringCbCopyA(Input->errorFunc, sizeof(Input->errorFunc), errorName); \
                                    Irp->IoStatus.Information = sizeof(VMIO_REQUEST); \
                                    Irp->IoStatus.Status = STATUS_SUCCESS; \
                                    IoCompleteRequest(Irp, IO_NO_INCREMENT); \
@@ -451,10 +467,10 @@ NTSTATUS CreateOrClose(PDEVICE_OBJECT DeviceObject, PIRP irp) {
 NTSTATUS IoControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
 
 	ULONG                controlCode  = IoGetCurrentIrpStackLocation(Irp)->Parameters.DeviceIoControl.IoControlCode;
-	VMIO_REQUEST*        Input        = Irp->AssociatedIrp.SystemBuffer;  /* ÓÃ»§»º³åÇøÔÚ¹¹ÔìÊ±ÒÑÇå0 */
+	VMIO_REQUEST*        Input        = Irp->AssociatedIrp.SystemBuffer;  /* ç”¨æˆ·ç¼“å†²åŒºåœ¨æ„é€ æ—¶å·²æ¸…0 */
 	PEPROCESS            pEProcess    = NULL;
-	SIZE_T               rwSize       = 0x1000;      /* Ã¿´ÎioÊÂ¼ş²Ù×÷µÄbyteÊı£¬¼´sizeof(request->data) */
-	SIZE_T               allocSize    = 0x1000 * 4;  /* ÈôioÊÂ¼şÎªalloc£¬ÔòÒ»´ÎĞÔ·ÖÅä4¸öÒ³Ãæ¡£*/
+	SIZE_T               rwSize       = 0x1000;      /* æ¯æ¬¡ioäº‹ä»¶æ“ä½œçš„byteæ•°ï¼Œå³sizeof(request->data) */
+	SIZE_T               allocSize    = 0x1000 * 4;  /* è‹¥ioäº‹ä»¶ä¸ºallocï¼Œåˆ™ä¸€æ¬¡æ€§åˆ†é…4ä¸ªé¡µé¢ã€‚*/
 	HANDLE               hProcess     = NULL;
 	OBJECT_ATTRIBUTES    objAttr      = { 0 };
 	CLIENT_ID            clientId     = { Input->pid, 0 };
@@ -496,15 +512,15 @@ NTSTATUS IoControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
 
 			ULONG oldProtect;
 
-			// [Åú×¢] ZwProtectVirtualMemory¼´Ê¹²Ù×÷Ê§°ÜÒ²²»»áBSOD£¬
-			// ÒòÎªĞŞ¸ÄÒ³Ãæ±£»¤ÊôĞÔ½öĞè²Ù×÷Ò³±íÏî¶ø²»ĞèÒªÊµ¼Ê¶ÁÈ¡Ò³Ãæ£¬¹Ê²¢²»´¥·¢page fault¡£
+			// [æ‰¹æ³¨] ZwProtectVirtualMemoryå³ä½¿æ“ä½œå¤±è´¥ä¹Ÿä¸ä¼šBSODï¼Œ
+			// å› ä¸ºä¿®æ”¹é¡µé¢ä¿æŠ¤å±æ€§ä»…éœ€æ“ä½œé¡µè¡¨é¡¹è€Œä¸éœ€è¦å®é™…è¯»å–é¡µé¢ï¼Œæ•…å¹¶ä¸è§¦å‘page faultã€‚
 			Status = ZwProtectVirtualMemory(hProcess, &Input->address, &rwSize, PAGE_EXECUTE_READWRITE, &oldProtect);
 			
 			if (!NT_SUCCESS(Status)) {
 				IOCTL_LOG_EXIT("VMIO_WRITE::ZwProtectVirtualMemory1");
 			}
 
-			// ¶ÏÑÔ£º²ÎÊı Input->Address ÏòµÍµØÖ·¶ÔÆëµ½Ò³±ß½ç£¨0x1000£©¡£
+			// æ–­è¨€ï¼šå‚æ•° Input->Address å‘ä½åœ°å€å¯¹é½åˆ°é¡µè¾¹ç•Œï¼ˆ0x1000ï¼‰ã€‚
 			Status = KeWriteVirtualMemory(pEProcess, Input->data, Input->address, rwSize);
 
 			if (!NT_SUCCESS(Status)) {
@@ -531,7 +547,7 @@ NTSTATUS IoControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
 			PVOID BaseAddress = NULL;
 
 			if (OSVersion.dwMajorVersion == 6 || (OSVersion.dwMajorVersion == 10 && OSVersion.dwBuildNumber == 10240)) {
-				// ¶ÔÓÚwin7/win8/win8.1/win10.10240£¬Ô¼Êø¶ÑµÄÆğÊ¼µØÖ·ÔÚ32bitÒÔÄÚ£¬ÒÔ·½±ã¹¹Ôìshellcode¡£×¢£º²ÎÊıZeroBitsµÄmsdnÃèÊöÓĞÎó£¬Ïê¼û£º
+				// å¯¹äºwin7/win8/win8.1/win10.10240ï¼Œçº¦æŸå †çš„èµ·å§‹åœ°å€åœ¨32bitä»¥å†…ï¼Œä»¥æ–¹ä¾¿æ„é€ shellcodeã€‚æ³¨ï¼šå‚æ•°ZeroBitsçš„msdnæè¿°æœ‰è¯¯ï¼Œè¯¦è§ï¼š
 				// https://stackoverflow.com/questions/50429365/what-is-the-most-reliable-portable-way-to-allocate-memory-at-low-addresses-on
 				Status = ZwAllocateVirtualMemory(hProcess, &BaseAddress, 0x7FFFFFFF, &allocSize, MEM_COMMIT, PAGE_EXECUTE);
 			} else {
@@ -593,12 +609,12 @@ NTSTATUS IoControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
 			}
 
 
-			// ´Ó(wchar_t*)Input->dataÖĞÈ¡Ä¿±êÄ£¿éÃû³Æ
+			// ä»(wchar_t*)Input->dataä¸­å–ç›®æ ‡æ¨¡å—åç§°
 			RtlZeroMemory(TargetImageName, sizeof(TargetImageName));
 			wcscpy_s(TargetImageName, 256, (wchar_t*)Input->data);
 
 
-			// ËÑË÷Ä¿±ê½ø³ÌµÄVadÊ÷ÒÔ»ñÈ¡ÔÚÓ¦ÓÃ²ã±»Òş²ØµÄÄ£¿éÎ»ÖÃ
+			// æœç´¢ç›®æ ‡è¿›ç¨‹çš„Vadæ ‘ä»¥è·å–åœ¨åº”ç”¨å±‚è¢«éšè—çš„æ¨¡å—ä½ç½®
 			SEARCH_RESULT result;
 			RtlZeroMemory(&result, sizeof(result));
 
@@ -623,29 +639,29 @@ NTSTATUS IoControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
 				PRTL_AVL_TREE pAvlEntry = (PRTL_AVL_TREE)((ULONG64)pEProcess + VadRoot);
 				PMMVAD_10 root = (PMMVAD_10)(pAvlEntry->Root);
 
-				if (root) {                            // Ë¼¿¼£ºÎªÊ²Ã´Ö»ÓĞÕâ¸ö·ÖÖ§ĞèÒªÅĞ¶ÏrootÊÇ·ñÎª¿ÕÖ¸Õë£¿
-					SearchVad_NT10(&result, root);     // ÌáÊ¾£ºpEProcess±ØÈ»ÊÇºÏ·¨µÄ½á¹¹µØÖ·¡£
+				if (root) {                            // æ€è€ƒï¼šä¸ºä»€ä¹ˆåªæœ‰è¿™ä¸ªåˆ†æ”¯éœ€è¦åˆ¤æ–­rootæ˜¯å¦ä¸ºç©ºæŒ‡é’ˆï¼Ÿ
+					SearchVad_NT10(&result, root);     // æç¤ºï¼špEProcesså¿…ç„¶æ˜¯åˆæ³•çš„ç»“æ„åœ°å€ã€‚
 				}
 			}
 			
 
-			// Çå¿Õ»º³åÇø½á¹¹ÒÔ×¼±¸´¢´æËÑË÷½á¹û
+			// æ¸…ç©ºç¼“å†²åŒºç»“æ„ä»¥å‡†å¤‡å‚¨å­˜æœç´¢ç»“æœ
 			RtlZeroMemory(Input->data, sizeof(Input->data));
 
 			if (result.Found) {
 
-				// Èç¹ûÕÒµ½£¬Ôò¼ÇÂ¼Ä¿±ê¾µÏñÖĞËùÓĞ¿ÉÖ´ĞĞÄ£¿éµÄĞéÄâµØÖ··¶Î§µ½Input->data£¬ÒÔ{0,0}½áÎ²
+				// å¦‚æœæ‰¾åˆ°ï¼Œåˆ™è®°å½•ç›®æ ‡é•œåƒä¸­æ‰€æœ‰å¯æ‰§è¡Œæ¨¡å—çš„è™šæ‹Ÿåœ°å€èŒƒå›´åˆ°Input->dataï¼Œä»¥{0,0}ç»“å°¾
 				// [note] typeof (Input->data) => struct { __int64[2]; } * ;
 				ULONG addressCount = 0;
 				
-				// ËÑË÷Ä¿±ê¾µÏñÖĞ¿ÉÖ´ĞĞÄ£¿éµÄÎ»ÖÃ
+				// æœç´¢ç›®æ ‡é•œåƒä¸­å¯æ‰§è¡Œæ¨¡å—çš„ä½ç½®
 				PVOID virtualStart = (PVOID)result.VirtualAddress[0];
 				while (virtualStart < (PVOID)result.VirtualAddress[1]) {
 
 					MEMORY_BASIC_INFORMATION memInfo;
 					Status = ZwQueryVirtualMemory(hProcess, virtualStart, MemoryBasicInformation, &memInfo, sizeof(memInfo), NULL);
 					
-					// Èç¹û²éÑ¯Ê§°Ü£¬ÔòÈÏÎªÒÑ¾­½áÊø
+					// å¦‚æœæŸ¥è¯¢å¤±è´¥ï¼Œåˆ™è®¤ä¸ºå·²ç»ç»“æŸ
 					if (!NT_SUCCESS(Status)) {
 						break;
 					}
@@ -655,7 +671,7 @@ NTSTATUS IoControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
 						memInfo.Protect & PAGE_EXECUTE_READWRITE ||
 						memInfo.Protect & PAGE_EXECUTE_WRITECOPY) {
 
-						// Èç¹ûÊÇ¿ÉÖ´ĞĞÄ£¿é£¬Ôò¼ÇÂ¼ĞéÄâµØÖ··¶Î§ÒÔ·µ»Ø¸øÓ¦ÓÃ²ã
+						// å¦‚æœæ˜¯å¯æ‰§è¡Œæ¨¡å—ï¼Œåˆ™è®°å½•è™šæ‹Ÿåœ°å€èŒƒå›´ä»¥è¿”å›ç»™åº”ç”¨å±‚
 						((PULONG64)Input->data) [ addressCount++ ] = (ULONG64)memInfo.BaseAddress;
 						((PULONG64)Input->data) [ addressCount++ ] = (ULONG64)memInfo.BaseAddress + memInfo.RegionSize;
 					}
@@ -679,8 +695,10 @@ NTSTATUS IoControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
 				} else {
 					if (OSVersion.dwBuildNumber <= 17763) {
 						((PMMVAD_10)TargetVad)->Core.u.VadFlags._17763.NoChange = 1;
-					} else {
+					} else if (OSVersion.dwBuildNumber < 28000) {
 						((PMMVAD_10)TargetVad)->Core.u.VadFlags._18362.NoChange = 1;
+					} else {
+						((PMMVAD_10)TargetVad)->Core.u.VadFlags._28000.NoChange = 1;
 					}
 				}
 			}
@@ -698,7 +716,7 @@ NTSTATUS IoControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
 			ULONG64                AceImageSize     = 0;
 			
 
-			// Ã¶¾ÙÏµÍ³ÖĞËùÓĞµÄÄÚºËÄ£¿é£¬ÕÒµ½aceÇı¶¯µÄµØÖ·
+			// æšä¸¾ç³»ç»Ÿä¸­æ‰€æœ‰çš„å†…æ ¸æ¨¡å—ï¼Œæ‰¾åˆ°aceé©±åŠ¨çš„åœ°å€
 			ZwQuerySystemInformation(SystemModuleInformation, NULL, 0, &infoLength);
 
 			moduleInfo = ExAllocatePoolWithTag(PagedPool, infoLength, '9d3H');
@@ -724,10 +742,10 @@ NTSTATUS IoControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
 				ExFreePoolWithTag(moduleInfo, '9d3H');
 			}
 
-			// ÈôÕÒ²»µ½Çı¶¯Ä£¿é£¬ÔòÍË³ö
+			// è‹¥æ‰¾ä¸åˆ°é©±åŠ¨æ¨¡å—ï¼Œåˆ™é€€å‡º
 			if (!AceImageBase) {
 				Status = STATUS_NOT_FOUND;
-				IOCTL_LOG_EXIT("TPÇı¶¯£¨ACE-BASE.sys£©ÉĞÎ´¼ÓÔØµ½ÏµÍ³ÄÚºË¡£Äú¿ÉÄÜÃ»ÓĞÆô¶¯ÓÎÏ·¡£");
+				IOCTL_LOG_EXIT("TPé©±åŠ¨ï¼ˆACE-BASE.sysï¼‰å°šæœªåŠ è½½åˆ°ç³»ç»Ÿå†…æ ¸ã€‚æ‚¨å¯èƒ½æ²¡æœ‰å¯åŠ¨æ¸¸æˆã€‚");
 			}
 
 			if (limitMode == 0) {
@@ -741,9 +759,9 @@ NTSTATUS IoControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
 					Status = STATUS_REQUEST_ABORTED;
 					if (match_pattern_image(AceImageBase, ".rdata",
 						"\x00\xfa\x00\xfb\x00\xfc\x00\xfd\x61\xfe\x6c\xcd\x6d\xcd\x65", "x?x?x?x?x?x?x?x")) {
-						IOCTL_LOG_EXIT("ÄúÖ®Ç°ÒÑ¾­Ö´ĞĞ¹ı¸Ã²Ù×÷£¬²»ÄÜÖØ¸´Ö´ĞĞ¡£");
+						IOCTL_LOG_EXIT("æ‚¨ä¹‹å‰å·²ç»æ‰§è¡Œè¿‡è¯¥æ“ä½œï¼Œä¸èƒ½é‡å¤æ‰§è¡Œã€‚");
 					} else {
-						IOCTL_LOG_EXIT("Î´ÕÒµ½ÌØÕ÷¡£ÒòÎªTPÇı¶¯£¨ACE-BASE.sys£©°æ±¾²»Æ¥Åä¡£");
+						IOCTL_LOG_EXIT("æœªæ‰¾åˆ°ç‰¹å¾ã€‚å› ä¸ºTPé©±åŠ¨ï¼ˆACE-BASE.sysï¼‰ç‰ˆæœ¬ä¸åŒ¹é…ã€‚");
 					}
 				}
 
@@ -751,7 +769,7 @@ NTSTATUS IoControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
 				PMDL pMdl = MmCreateMdl(NULL, (PVOID)(targetAddr & ~0xfff), 0x1000);
 				if (!pMdl) {
 					Status = STATUS_MEMORY_NOT_ALLOCATED;
-					IOCTL_LOG_EXIT("MmCreateMdlÊ§°Ü¡£");
+					IOCTL_LOG_EXIT("MmCreateMdlå¤±è´¥ã€‚");
 				}
 
 				pMdl->MdlFlags = pMdl->MdlFlags | MDL_MAPPED_TO_SYSTEM_VA;
@@ -762,7 +780,7 @@ NTSTATUS IoControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
 				if (NULL == mappedAddr) {
 					IoFreeMdl(pMdl);
 					Status = STATUS_UNSUCCESSFUL;
-					IOCTL_LOG_EXIT("MmMapLockedPagesÊ§°Ü¡£");
+					IOCTL_LOG_EXIT("MmMapLockedPageså¤±è´¥ã€‚");
 				}
 
 				*(ULONG64*)((ULONG64)mappedAddr + (targetAddr & 0xfff)) = 0;
@@ -773,7 +791,7 @@ NTSTATUS IoControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
 			} else if (limitMode == 1) {
 
 				// cfg hook: 
-				//£¨ÎÒÔÚĞ´Óêµ«Í¨Æª¶¼²»¼ûÓê£¬ÄãÄÜ¿´³öÎÒÔÚĞ´Ë­Âğ£¿£©
+				//ï¼ˆæˆ‘åœ¨å†™é›¨ä½†é€šç¯‡éƒ½ä¸è§é›¨ï¼Œä½ èƒ½çœ‹å‡ºæˆ‘åœ¨å†™è°å—ï¼Ÿï¼‰
 
 				ULONG64 rip = match_pattern_image(AceImageBase, ".text",
 					"\x48\x8B\x54\x24\x60\x48\xC7\xC1\xFF\xFF\xFF\xFF\xFF\x15\x00\x00\x00\x00\x48\x81\xC4\x88\x00\x00\x00\xC3",
@@ -781,14 +799,14 @@ NTSTATUS IoControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
 
 				if (!rip) {
 					Status = STATUS_REQUEST_ABORTED;
-					IOCTL_LOG_EXIT("Î´ÕÒµ½ÌØÕ÷¡£ÒòÎªTPÇı¶¯£¨ACE-BASE.sys£©°æ±¾²»Æ¥Åä¡£");
+					IOCTL_LOG_EXIT("æœªæ‰¾åˆ°ç‰¹å¾ã€‚å› ä¸ºTPé©±åŠ¨ï¼ˆACE-BASE.sysï¼‰ç‰ˆæœ¬ä¸åŒ¹é…ã€‚");
 				}
 
 				rip = rip + 0x12 + *(LONG*)(rip + 0xe);
 
 				if (!MmIsAddressValid(*(PVOID*)rip)) {
 					Status = STATUS_REQUEST_ABORTED;
-					IOCTL_LOG_EXIT("MmIsAddressValid¶ÏÑÔÊ§°Ü¡£");
+					IOCTL_LOG_EXIT("MmIsAddressValidæ–­è¨€å¤±è´¥ã€‚");
 				}
 
 				char shell[] =
@@ -822,17 +840,17 @@ NTSTATUS IoControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
 				
 				if (0 == memcmp(DetourMain, *(const PVOID*)rip, 0xb)) {
 					Status = STATUS_UNSUCCESSFUL;
-					IOCTL_LOG_EXIT("ÄúÒÑ¾­Ö´ĞĞ¹ı¸Ã²Ù×÷ÁË£¬²»ÄÜÖØ¸´Ö´ĞĞ¡£");
+					IOCTL_LOG_EXIT("æ‚¨å·²ç»æ‰§è¡Œè¿‡è¯¥æ“ä½œäº†ï¼Œä¸èƒ½é‡å¤æ‰§è¡Œã€‚");
 				}
 
 
-				*(PVOID*)(shell + 0x2e) = KeDelayExecutionThread;  // È¡Ô­Ê¼ÄÚºËº¯ÊıµØÖ·¶ø·Çiat¼ä½ÓµØÖ·£»´Ë´¦µÈ¼ÛÓÚÔ­Ê¼º¯ÊıµØÖ·¡£
+				*(PVOID*)(shell + 0x2e) = KeDelayExecutionThread;  // å–åŸå§‹å†…æ ¸å‡½æ•°åœ°å€è€Œéiaté—´æ¥åœ°å€ï¼›æ­¤å¤„ç­‰ä»·äºåŸå§‹å‡½æ•°åœ°å€ã€‚
 				*(PVOID*)(shell + 0x48) = pOriginal = *(PVOID*)rip;
 				
-				char* shellSpace = ExAllocatePoolWithTag(PagedPool, sizeof(shell), '9d3H');  // ÒÑ¾­16×Ö½Ú¶ÔÆë£¨²Î¼ûMSDN£©
+				char* shellSpace = ExAllocatePoolWithTag(PagedPool, sizeof(shell), '9d3H');  // å·²ç»16å­—èŠ‚å¯¹é½ï¼ˆå‚è§MSDNï¼‰
 				if (!shellSpace) {
 					Status = STATUS_MEMORY_NOT_ALLOCATED;
-					IOCTL_LOG_EXIT("ExAllocatePoolWithTagÊ§°Ü¡£");
+					IOCTL_LOG_EXIT("ExAllocatePoolWithTagå¤±è´¥ã€‚");
 				}
 				
 				RtlCopyMemory(shellSpace, shell, sizeof(shell));
@@ -841,7 +859,7 @@ NTSTATUS IoControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
 				PMDL pMdl = IoAllocateMdl((PVOID)rip, 8, FALSE, FALSE, NULL);
 				if (!pMdl) {
 					Status = STATUS_UNSUCCESSFUL;
-					IOCTL_LOG_EXIT("IoAllocateMdlÊ§°Ü¡£");
+					IOCTL_LOG_EXIT("IoAllocateMdlå¤±è´¥ã€‚");
 				}
 
 				__try {
@@ -849,14 +867,14 @@ NTSTATUS IoControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
 				} __except (EXCEPTION_EXECUTE_HANDLER) {
 					IoFreeMdl(pMdl);
 					Status = STATUS_UNSUCCESSFUL;
-					IOCTL_LOG_EXIT("MmProbeAndLockPagesÊ§°Ü¡£");
+					IOCTL_LOG_EXIT("MmProbeAndLockPageså¤±è´¥ã€‚");
 				}
 				
 				PVOID mapAddress = MmMapLockedPagesSpecifyCache(pMdl, KernelMode, MmNonCached, NULL, FALSE, NormalPagePriority);
 				if (!mapAddress) {
 					IoFreeMdl(pMdl);
 					Status = STATUS_UNSUCCESSFUL;
-					IOCTL_LOG_EXIT("MmMapLockedPagesSpecifyCacheÊ§°Ü¡£");
+					IOCTL_LOG_EXIT("MmMapLockedPagesSpecifyCacheå¤±è´¥ã€‚");
 				}
 
 				Status = MmProtectMdlSystemAddress(pMdl, PAGE_READWRITE);
@@ -865,7 +883,7 @@ NTSTATUS IoControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
 					MmUnlockPages(pMdl);
 					IoFreeMdl(pMdl);
 					Status = STATUS_UNSUCCESSFUL;
-					IOCTL_LOG_EXIT("MmProtectMdlSystemAddressÊ§°Ü¡£");
+					IOCTL_LOG_EXIT("MmProtectMdlSystemAddresså¤±è´¥ã€‚");
 				}
 
 				InterlockedExchange64(mapAddress, (LONG64)DetourMain);
@@ -874,7 +892,7 @@ NTSTATUS IoControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
 				MmUnlockPages(pMdl);
 				IoFreeMdl(pMdl);
 
-				expectedCip = (PVOID)rip;  // ÓÃÓÚ½»»»µÄÄÚ²¿º¯ÊıËùÔÚµÄ·ÖÒ³µØÖ·ÔÚĞ¶ÔØºóÎŞ·¨·ÃÎÊ£¬Ê¹ÓÃÒÑ·ÖÅäµÄshell¿Õ¼ä¼´¿É
+				expectedCip = (PVOID)rip;  // ç”¨äºäº¤æ¢çš„å†…éƒ¨å‡½æ•°æ‰€åœ¨çš„åˆ†é¡µåœ°å€åœ¨å¸è½½åæ— æ³•è®¿é—®ï¼Œä½¿ç”¨å·²åˆ†é…çš„shellç©ºé—´å³å¯
 
 			} else {
 				
@@ -885,20 +903,20 @@ NTSTATUS IoControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
 
 				if (!rip) {
 					Status = STATUS_REQUEST_ABORTED;
-					IOCTL_LOG_EXIT("Î´ÕÒµ½ÌØÕ÷1¡£ÒòÎªTPÇı¶¯£¨ACE-BASE.sys£©°æ±¾²»Æ¥Åä¡£");
+					IOCTL_LOG_EXIT("æœªæ‰¾åˆ°ç‰¹å¾1ã€‚å› ä¸ºTPé©±åŠ¨ï¼ˆACE-BASE.sysï¼‰ç‰ˆæœ¬ä¸åŒ¹é…ã€‚");
 				}
 
 				rip = rip + 0xe + *(LONG*)(rip + 0xa);
 
 				if (!MmIsAddressValid((PVOID)rip)) {
 					Status = STATUS_UNSUCCESSFUL;
-					IOCTL_LOG_EXIT("MmIsAddressValid¶ÏÑÔÊ§°Ü¡£");
+					IOCTL_LOG_EXIT("MmIsAddressValidæ–­è¨€å¤±è´¥ã€‚");
 				}
 
 				PMDL pMdl = IoAllocateMdl((PVOID)rip, 8, FALSE, FALSE, NULL);
 				if (!pMdl) {
 					Status = STATUS_UNSUCCESSFUL;
-					IOCTL_LOG_EXIT("IoAllocateMdlÊ§°Ü¡£");
+					IOCTL_LOG_EXIT("IoAllocateMdlå¤±è´¥ã€‚");
 				}
 
 				pMdl->MdlFlags = pMdl->MdlFlags | MDL_MAPPED_TO_SYSTEM_VA;
@@ -909,7 +927,7 @@ NTSTATUS IoControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
 				if (NULL == mapAddress) {
 					IoFreeMdl(pMdl);
 					Status = STATUS_UNSUCCESSFUL;
-					IOCTL_LOG_EXIT("MmMapLockedPagesÊ§°Ü¡£");
+					IOCTL_LOG_EXIT("MmMapLockedPageså¤±è´¥ã€‚");
 				}
 
 				InterlockedExchange64(mapAddress, 0);
@@ -923,20 +941,20 @@ NTSTATUS IoControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
 
 				if (!rip) {
 					Status = STATUS_REQUEST_ABORTED;
-					IOCTL_LOG_EXIT("Î´ÕÒµ½ÌØÕ÷2¡£ÒòÎªTPÇı¶¯£¨ACE-BASE.sys£©°æ±¾²»Æ¥Åä¡£");
+					IOCTL_LOG_EXIT("æœªæ‰¾åˆ°ç‰¹å¾2ã€‚å› ä¸ºTPé©±åŠ¨ï¼ˆACE-BASE.sysï¼‰ç‰ˆæœ¬ä¸åŒ¹é…ã€‚");
 				}
 
 				rip = rip + 0xc + *(LONG*)(rip + 0x8);
 
 				if (!MmIsAddressValid((PVOID)rip)) {
 					Status = STATUS_UNSUCCESSFUL;
-					IOCTL_LOG_EXIT("MmIsAddressValid¶ÏÑÔÊ§°Ü¡£");
+					IOCTL_LOG_EXIT("MmIsAddressValidæ–­è¨€å¤±è´¥ã€‚");
 				}
 
 				pMdl = IoAllocateMdl((PVOID)rip, 8, FALSE, FALSE, NULL);
 				if (!pMdl) {
 					Status = STATUS_UNSUCCESSFUL;
-					IOCTL_LOG_EXIT("IoAllocateMdlÊ§°Ü¡£");
+					IOCTL_LOG_EXIT("IoAllocateMdlå¤±è´¥ã€‚");
 				}
 
 				pMdl->MdlFlags = pMdl->MdlFlags | MDL_MAPPED_TO_SYSTEM_VA;
@@ -947,7 +965,7 @@ NTSTATUS IoControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
 				if (NULL == mapAddress) {
 					IoFreeMdl(pMdl);
 					Status = STATUS_UNSUCCESSFUL;
-					IOCTL_LOG_EXIT("MmMapLockedPagesÊ§°Ü¡£");
+					IOCTL_LOG_EXIT("MmMapLockedPageså¤±è´¥ã€‚");
 				}
 
 				InterlockedExchange64(mapAddress, 2);
@@ -993,11 +1011,11 @@ NTSTATUS UnloadDriver(PDRIVER_OBJECT pDriverObject) {
 
 	IoDeleteSymbolicLink(&dos);
 
-	if (MmIsAddressValid(pDeviceObject)) {  // ²»Ê¹ÓÃpDriverObject->DeviceObject£¬ÒòÎªËü¿ÉÄÜÊÇ¿ÕÖ¸Õë
+	if (MmIsAddressValid(pDeviceObject)) {  // ä¸ä½¿ç”¨pDriverObject->DeviceObjectï¼Œå› ä¸ºå®ƒå¯èƒ½æ˜¯ç©ºæŒ‡é’ˆ
 		IoDeleteDevice(pDeviceObject);
 	}
 	
-	if (expectedCip) {  // Ğ¶ÔØÊ±Í¬Ê±Ïú»Ùpatch²Ù×÷¡£
+	if (expectedCip) {  // å¸è½½æ—¶åŒæ—¶é”€æ¯patchæ“ä½œã€‚
 
 		PMDL pMdl = IoAllocateMdl((PVOID)expectedCip, 8, FALSE, FALSE, NULL);
 		if (!pMdl) {
@@ -1037,14 +1055,16 @@ NTSTATUS UnloadDriver(PDRIVER_OBJECT pDriverObject) {
 }
 
 
-// Èë¿Úµã
+// å…¥å£ç‚¹
 NTSTATUS DriverEntry(
 	PDRIVER_OBJECT pDriverObject, 
 	PUNICODE_STRING pRegistryPath) {
 
+	NTSTATUS status;
+
 	DbgPrint("[Hutao] Kernel Mode Loading ...\n");
 
-	// ÉèÖÃ»Øµ÷º¯Êı×é
+	// è®¾ç½®å›è°ƒå‡½æ•°ç»„
 	pDriverObject->MajorFunction[IRP_MJ_CREATE]         = CreateOrClose;    // <- CreateFile()
 	pDriverObject->MajorFunction[IRP_MJ_CLOSE]          = CreateOrClose;    // <- CloseHandle()
 	pDriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = IoControl;        // <- DeviceIoControl()
@@ -1054,12 +1074,12 @@ NTSTATUS DriverEntry(
 		return STATUS_OPLOCK_BREAK_IN_PROGRESS;
 	}
 
-	// »ñÈ¡²Ù×÷ÏµÍ³°æ±¾
+	// è·å–æ“ä½œç³»ç»Ÿç‰ˆæœ¬
 	OSVersion.dwOSVersionInfoSize = sizeof(RTL_OSVERSIONINFOW);
 	RtlGetVersion(&OSVersion);
 
 
-	// »ñÈ¡VadRootÔÚ_EPROCESSÖĞµÄÆ«ÒÆ
+	// è·å–VadRootåœ¨_EPROCESSä¸­çš„åç§»
 	if (OSVersion.dwMajorVersion == 6 && OSVersion.dwMinorVersion == 1) {  // Win 7 (SP0, SP1)
 		VadRoot = 0x448;
 
@@ -1099,40 +1119,45 @@ NTSTATUS DriverEntry(
 		} else if (OSVersion.dwBuildNumber < 26058) {  // Win 11 < 24H2
 			VadRoot = 0x7D8;
 
-		} else {  // Win 11 24H2
+		} else if (OSVersion.dwBuildNumber < 28000) {  // Win 11 24H2/25H2 (26058, 26100, 26200)
+			VadRoot = 0x558;
+		}
+		else {  // Win 11 26H1 (28000, 28020)  // VadFlags & MMVAD changed
 			VadRoot = 0x558;
 		}
 	}
 
 	if (!VadRoot) {
+		DbgPrint("[Hutao] VadRoot not found! system version: %d.%d.%d\n", 
+			     OSVersion.dwMajorVersion, OSVersion.dwMinorVersion, OSVersion.dwBuildNumber);
 		return STATUS_NOT_SUPPORTED;
 	}
 
 
-	// ÊÖ¶¯»ñÈ¡ZwProtectVirtualMemoryµÄµØÖ·£¬¸Ãº¯Êı½öÔÚwin8.1£¨NT6.3£©ºÍÖ®ºóµÄÏµÍ³°æ±¾µ¼³ö¡£
+	// æ‰‹åŠ¨è·å–ZwProtectVirtualMemoryçš„åœ°å€ï¼Œè¯¥å‡½æ•°ä»…åœ¨win8.1ï¼ˆNT6.3ï¼‰å’Œä¹‹åçš„ç³»ç»Ÿç‰ˆæœ¬å¯¼å‡ºã€‚
 	UNICODE_STRING ZwProtectVirtualMemoryName;
 	RtlInitUnicodeString(&ZwProtectVirtualMemoryName, L"ZwProtectVirtualMemory");
 	ZwProtectVirtualMemory = MmGetSystemRoutineAddress(&ZwProtectVirtualMemoryName);
 
 	if (!ZwProtectVirtualMemory) {
 
-		// Èç¹ûÎ´µ¼³öÄ¿±êº¯Êı£¬ÇÒ²»ÊÇwin7£¨NT6.1£©»òwin8£¨NT6.2£©£¬ÔòÍË³ö¡£
+		// å¦‚æœæœªå¯¼å‡ºç›®æ ‡å‡½æ•°ï¼Œä¸”ä¸æ˜¯win7ï¼ˆNT6.1ï¼‰æˆ–win8ï¼ˆNT6.2ï¼‰ï¼Œåˆ™é€€å‡ºã€‚
 		if (!(OSVersion.dwMajorVersion == 6 && OSVersion.dwMinorVersion == 1) &&
 			!(OSVersion.dwMajorVersion == 6 && OSVersion.dwMinorVersion == 2)) {
 			return STATUS_NOT_IMPLEMENTED;
 		}
 
-		// ³¢ÊÔÊÖ¶¯»ñÈ¡ZwProtectVirtualMemoryµÄĞéÄâµØÖ·¡£
-		// ĞÒÔËµÄÊÇ£¬¾¡¹ÜntÄÚºËÃ»ÓĞµ¼³öËùÓĞZwº¯Êı£¬µ«ËùÓĞSSDTÖĞ±êÃ÷µÄ·şÎñ¶¼ÔÚÄÚºËÖĞ´æÔÚ¾µÏñÈë¿Ú£¬
-		// ´ËÍâËùÓĞµÄZwº¯Êı¶¼°´0x20×Ö½Ú¶ÔÆë£¬ÇÒÒÀ¾İSSDTÖĞµÄË³ĞòÓ³Éäµ½Á¬ĞøµÄĞéÄâÄÚ´æ¿Õ¼ä¡£
-		// Ö»ÒªµÃµ½Ò»¸ö±Ø¶¨µ¼³öµÄZwº¯ÊıºÍÄ¿±êZwº¯ÊıµÄÏµÍ³·şÎñºÅ£¬¾Í¿ÉÒÔµÃµ½Ä¿±êZwº¯ÊıµÄÈë¿ÚµØÖ·¡£
+		// å°è¯•æ‰‹åŠ¨è·å–ZwProtectVirtualMemoryçš„è™šæ‹Ÿåœ°å€ã€‚
+		// å¹¸è¿çš„æ˜¯ï¼Œå°½ç®¡ntå†…æ ¸æ²¡æœ‰å¯¼å‡ºæ‰€æœ‰Zwå‡½æ•°ï¼Œä½†æ‰€æœ‰SSDTä¸­æ ‡æ˜çš„æœåŠ¡éƒ½åœ¨å†…æ ¸ä¸­å­˜åœ¨é•œåƒå…¥å£ï¼Œ
+		// æ­¤å¤–æ‰€æœ‰çš„Zwå‡½æ•°éƒ½æŒ‰0x20å­—èŠ‚å¯¹é½ï¼Œä¸”ä¾æ®SSDTä¸­çš„é¡ºåºæ˜ å°„åˆ°è¿ç»­çš„è™šæ‹Ÿå†…å­˜ç©ºé—´ã€‚
+		// åªè¦å¾—åˆ°ä¸€ä¸ªå¿…å®šå¯¼å‡ºçš„Zwå‡½æ•°å’Œç›®æ ‡Zwå‡½æ•°çš„ç³»ç»ŸæœåŠ¡å·ï¼Œå°±å¯ä»¥å¾—åˆ°ç›®æ ‡Zwå‡½æ•°çš„å…¥å£åœ°å€ã€‚
 
-		// »ñÈ¡ÏµÍ³·şÎñ ZwClose µÄÈë¿ÚµØÖ·£¬¸Ãº¯Êı±Ø¶¨µ¼³ö¡£
+		// è·å–ç³»ç»ŸæœåŠ¡ ZwClose çš„å…¥å£åœ°å€ï¼Œè¯¥å‡½æ•°å¿…å®šå¯¼å‡ºã€‚
 		UNICODE_STRING ZwCloseName;
 		RtlInitUnicodeString(&ZwCloseName, L"ZwClose");
 		ULONG64 ZwClose = (ULONG64)MmGetSystemRoutineAddress(&ZwCloseName);
 
-		// ÒÀ¾İZwCloseµÄµØÖ·£¬Çó½âZwProtectVirtualMemoryµÄµØÖ·¡£
+		// ä¾æ®ZwCloseçš„åœ°å€ï¼Œæ±‚è§£ZwProtectVirtualMemoryçš„åœ°å€ã€‚
 		if (OSVersion.dwMinorVersion == 1) {
 			ZwProtectVirtualMemory = (PVOID)(ZwClose - 0x20 * 0xC + 0x20 * 0x4D); // NT 6.1
 		} else {
@@ -1141,16 +1166,21 @@ NTSTATUS DriverEntry(
 	}
 
 
-	// ´´½¨·ûºÅÁ´½ÓºÍĞéÄâioÉè±¸
-	RtlInitUnicodeString(&dev, L"\\Device\\Hutao");
-	RtlInitUnicodeString(&dos, L"\\DosDevices\\Hutao");
-	IoCreateSymbolicLink(&dos, &dev);
+	// åˆ›å»ºç¬¦å·é“¾æ¥å’Œè™šæ‹Ÿioè®¾å¤‡
+	RtlInitUnicodeString(&dev, L"\\Device\\Hutaok");
+	RtlInitUnicodeString(&dos, L"\\DosDevices\\Hutaok");
+	status = IoCreateSymbolicLink(&dos, &dev);
+	if (!NT_SUCCESS(status)) {
+		DbgPrint("[Hutao] IoCreateSymbolicLink failed, ntstatus: %x\n", status);
+		return STATUS_UNSUCCESSFUL;
+	}
 
-	IoCreateDevice(pDriverObject, 0, &dev, FILE_DEVICE_UNKNOWN, FILE_DEVICE_SECURE_OPEN, FALSE, &pDeviceObject);
+	status = IoCreateDevice(pDriverObject, 0, &dev, FILE_DEVICE_UNKNOWN, FILE_DEVICE_SECURE_OPEN, FALSE, &pDeviceObject);
 	if (pDeviceObject) {
 		pDeviceObject->Flags |= DO_DIRECT_IO;
 		pDeviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
 	} else {
+		DbgPrint("[Hutao] IoCreateDevice failed, ntstatus: %x\n", status);
 		return STATUS_UNSUCCESSFUL;
 	}
 

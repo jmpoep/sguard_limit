@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include <ntdef.h>
 
 
@@ -162,7 +162,7 @@ struct _MMVAD_FLAGS_10_17763 { // 9600 & 10240 ~ 17763
     unsigned long DeleteInProgress : 1; // Size=4 Offset=0 BitOffset=31 BitCount=1
 }; // length = 4(0x4)
 
-struct _MMVAD_FLAGS_10_18362 { // 18362 ~ 22000
+struct _MMVAD_FLAGS_10_18362 { // 18362 ~ 26100
     /*Offset=0x0000:0,BitLen=1*/ unsigned long Lock : 1;
     /*Offset=0x0000:1,BitLen=1*/ unsigned long LockContended : 1;
     /*Offset=0x0000:2,BitLen=1*/ unsigned long DeleteInProgress : 1;
@@ -174,9 +174,20 @@ struct _MMVAD_FLAGS_10_18362 { // 18362 ~ 22000
     /*Offset=0x0000:21,BitLen=1*/ unsigned long PrivateMemory : 1;
 }; // length = 4(0x4)
 
+struct _MMVAD_FLAGS_10_28000 { // 28000 ~
+    /*Offset=0x0000:0,BitLen=1*/ unsigned long DeleteInProgress : 1;
+    /*Offset=0x0000:1,BitLen=1*/ unsigned long NoChange : 1;
+    /*Offset=0x0000:2,BitLen=3*/ unsigned long VadType : 3;
+    /*Offset=0x0000:5,BitLen=5*/ unsigned long Protection : 5;
+    /*Offset=0x0000:10,BitLen=7*/ unsigned long PreferredNode : 7;
+    /*Offset=0x0000:17,BitLen=2*/ unsigned long PageSize : 2;
+    /*Offset=0x0000:19,BitLen=1*/ unsigned long PrivateMemory : 1;
+}; // length = 4(0x4)
+
 union _MMVAD_FLAGS_10 {
     struct _MMVAD_FLAGS_10_17763 _17763;
     struct _MMVAD_FLAGS_10_18362 _18362;
+    struct _MMVAD_FLAGS_10_28000 _28000;
 };
 
 union ___unnamed1951 {
@@ -203,12 +214,21 @@ struct _MMVAD_SHORT_10 {
 };
 
 typedef struct _MMVAD_10 {
-    struct _MMVAD_SHORT_10 Core; // Size=64 Offset=0
-    unsigned long u2; // Size=4 Offset=64
-    unsigned long pad0;  // Size=4 Offset=68
-    struct _SUBSECTION* Subsection; // Size=8 Offset=72
+    /*Offset=0x0000,Len=0x0040*/ struct _MMVAD_SHORT_10 Core;  // note: size=0x40 before 26200
+    /*Offset=0x0040,Len=0x0004*/ unsigned long VadFlags2;
+    /* aligned memory         */ unsigned long pad0;
+    /*Offset=0x0048,Len=0x0008*/ struct _SUBSECTION* Subsection;
     // Other fields
 } MMVAD_10, *PMMVAD_10;
+
+typedef struct _MMVAD_10_28000 {
+    /*Offset=0x0000,Len=0x0048*/ struct _MMVAD_SHORT_10 Core;  // note: size=0x40+0x8 since 28000 (Core+CoreTail)
+    /*aligned MMVAD_SHORT Core*/ unsigned __int64 CoreTail;
+    /*Offset=0x0048,Len=0x0004*/ unsigned long VadFlags2;
+    /*Offset=0x0050,Len=0x0008*/ struct _SUBSECTION* Subsection;
+    // Other fields
+} MMVAD_10_28000, *PMMVAD_10_28000;
+
 
 typedef struct _RTL_AVL_TREE {
     struct _RTL_BALANCED_NODE* Root;
