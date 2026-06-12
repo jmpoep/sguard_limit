@@ -1,7 +1,7 @@
-#pragma once
+﻿#pragma once
 #include <Windows.h>
+#include <string>
 #include <atomic>
-#include <vector>
 #include <unordered_map>
 
 
@@ -9,18 +9,20 @@
 class PatchManager {
 
 private:
-	static PatchManager        patchManager;
-
-private:
 	PatchManager();
-	~PatchManager()                                  = default;
+	~PatchManager() = default;
+
+public:
+	static PatchManager& getInstance() {
+		static PatchManager instance;
+		return instance;
+	}
+
 	PatchManager(const PatchManager&)                = delete;
 	PatchManager(PatchManager&&)                     = delete;
 	PatchManager& operator= (const PatchManager&)    = delete;
 	PatchManager& operator= (PatchManager&&)         = delete;
 
-public:
-	static PatchManager&       getInstance();
 
 public:
 	typedef struct tagPatchSwitches_t {
@@ -38,17 +40,21 @@ public:
 		DWORD low, def, high;
 	};
 
-	std::atomic<bool>             patchEnabled;
+	std::atomic<bool>             patchEnabled{true};
 
-	patchSwitches_t               patchSwitches;
-	std::atomic<DWORD>            patchDelay[5];
+	patchSwitches_t               patchSwitches{};
+	std::atomic<DWORD>            patchDelay[5]{};
 	const patchDelayRange_t       patchDelayRange[5];
 
-	std::atomic<DWORD>            patchPid;
-	patchStatus_t                 patchStatus;
+	std::atomic<DWORD>            patchPid{0};
+	patchStatus_t                 patchStatus{};
 
-	std::atomic<DWORD>            patchDelayBeforeNtdlletc;
+	std::atomic<DWORD>            patchDelayBeforeNtdlletc{20};
 
+
+public:
+	void      loadConfig();
+	void      writeConfig();
 
 public:
 	bool      init();
@@ -60,7 +66,8 @@ public:
 
 
 private:
-	DWORD     _getSyscallNumber(const char* funcName, const char* libName);
+	void      _applyDefaultConfig();
+	DWORD     _getSyscallNumber(const char* funcName, LPCWSTR libName);
 
 	bool      _patch_ntdll(DWORD pid, patchSwitches_t& switches);
 	bool      _patch_user32(DWORD pid, patchSwitches_t& switches);
@@ -68,5 +75,5 @@ private:
 	bool      _fixThreadContext(ULONG64 pOrginalStart, ULONG64 patchSize, ULONG64 pDetourStart);
 
 private:
-	std::unordered_map<std::string, DWORD>   syscallTable;  // func name -> native syscall num
+	std::unordered_map<std::string, DWORD>   syscallTable{};  // func name -> native syscall num
 };

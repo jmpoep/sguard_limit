@@ -1,9 +1,9 @@
-#pragma once
+ï»¿#pragma once
 #include <Windows.h>
 
 
-#define VERSION             "24.10.26 ºúÌÒ±¦±´¸´¿ÌÌØ±ğ°æ"
-#define MEMPATCH_VERSION    "V4.12"
+#define VERSION             "26.6.12 H3D9å®è´ç”Ÿæ—¥ç‰¹åˆ«ç‰ˆ"
+#define MEMPATCH_VERSION    "V5.4"
 
 #define WM_TRAYACTIVATE     WM_APP + 10U
 
@@ -37,6 +37,8 @@
 #define IDM_PATCHSWITCH7    226
 #define IDM_PATCHSWITCH8    227
 #define IDM_ADVMEMSEARCH    228
+#define IDM_PROXYCONFIG     229
+#define IDM_USEHEARTBLEED   230
 
 
 // other commands

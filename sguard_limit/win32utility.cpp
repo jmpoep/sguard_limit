@@ -1,4 +1,4 @@
-#include <Windows.h>
+Ôªø#include <Windows.h>
 #include <Shlobj.h>
 #include <tlhelp32.h>
 #include <wininet.h>
@@ -8,15 +8,22 @@
 #include <filesystem>
 #include <cjson/cJSON.h>
 #include "win32utility.h"
-
-#define PROGRAM_NAME  "Hutao"
+#include "config.h"
+#include "app_paths.h"
+#include "resource.h"
+#include "wndproc.h"  // macro VERSION
+#include "string_conv.h"
 
 namespace fs = std::filesystem;
 
+extern ConfigManager&       configMgr;
+extern win32SystemManager&  systemMgr;
+
 
 // win32Thread
+
 win32Thread::win32Thread(DWORD tid, DWORD desiredAccess)
-	: tid(tid), handle(NULL), cycles(0), cycleDelta(0), cycleDeltaAvg(0), _refCount(new DWORD(1)) {
+	: tid{tid}, _refCount{new DWORD(1)} {
 	if (tid != 0) {
 		handle = OpenThread(desiredAccess, FALSE, tid);
 	}
@@ -33,7 +40,7 @@ win32Thread::~win32Thread() {
 }
 
 win32Thread::win32Thread(const win32Thread& t)
-	: tid(t.tid), handle(t.handle), cycles(t.cycles), cycleDelta(t.cycleDelta), cycleDeltaAvg(t.cycleDeltaAvg), _refCount(t._refCount) {
+	: tid{t.tid}, handle{t.handle}, cycles{t.cycles}, cycleDelta{t.cycleDelta}, cycleDeltaAvg{t.cycleDeltaAvg}, _refCount{t._refCount} {
 	++ *_refCount;
 }
 
@@ -57,8 +64,6 @@ void win32Thread::_mySwap(win32Thread& t1, win32Thread& t2) {
 
 
 // win32ThreadManager
-win32ThreadManager::win32ThreadManager() 
-	: pid(0), threadCount(0), threadList{} {}
 
 DWORD win32ThreadManager::getTargetPid(const char* procName) {  // ret == 0 if no proc.
 
@@ -75,7 +80,7 @@ DWORD win32ThreadManager::getTargetPid(const char* procName) {  // ret == 0 if n
 	}
 
 	for (BOOL next = Process32First(hSnapshot, &pe); next; next = Process32Next(hSnapshot, &pe)) {
-		if (_strcmpi(pe.szExeFile, procName) == 0) {
+		if (_wcsicmp(pe.szExeFile, Utf8ToWide(procName)) == 0) {
 			pid = pe.th32ProcessID;
 			break; // assert: only 1 pinstance.
 		}
@@ -84,6 +89,31 @@ DWORD win32ThreadManager::getTargetPid(const char* procName) {  // ret == 0 if n
 	CloseHandle(hSnapshot);
 
 	return pid;
+}
+
+std::vector<DWORD> win32ThreadManager::getTargetPidList(const char* procName) {  // ret == 0 if no proc.
+
+	HANDLE            hSnapshot    = NULL;
+	PROCESSENTRY32    pe           = {};
+	pe.dwSize = sizeof(PROCESSENTRY32);
+
+
+	hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+	if (hSnapshot == INVALID_HANDLE_VALUE) {
+		return {};
+	}
+
+	std::vector<DWORD> pid_list = {};
+
+	for (BOOL next = Process32First(hSnapshot, &pe); next; next = Process32Next(hSnapshot, &pe)) {
+		if (_wcsicmp(pe.szExeFile, Utf8ToWide(procName)) == 0) {
+			pid_list.push_back(pe.th32ProcessID);
+		}
+	}
+
+	CloseHandle(hSnapshot);
+
+	return pid_list;
 }
 
 bool win32ThreadManager::killTarget() { // kill process: return true if killed.
@@ -146,18 +176,15 @@ bool win32ThreadManager::enumTargetThread(DWORD desiredAccess) { // => threadLis
 }
 
 
-// win32SystemManager
-win32SystemManager win32SystemManager::systemManager;
-
-win32SystemManager::win32SystemManager() 
-	: cloudDataReady(false), cloudVersion{}, cloudVersionDetail{},
-	  cloudUpdateLink{}, cloudShowNotice{}, cloudBanList{},
-	  autoStartup(false), autoCheckUpdate(true), killAceLoader(true), 
-	  hInstance(NULL), hWnd(NULL), hProgram(NULL),
-	  profileDir{}, osVersion(OSVersion::OTHERS), osBuildNum(0), 
-	  logfp(NULL), icon{} {}
+// win32SystemManager (sington)
 
 win32SystemManager::~win32SystemManager() {
+
+	joinBackgroundThreads();
+
+	if (hStoppableEvent) {
+		CloseHandle(hStoppableEvent);
+	}
 
 	if (logfp) {
 		fclose(logfp);
@@ -168,22 +195,18 @@ win32SystemManager::~win32SystemManager() {
 	}
 }
 
-win32SystemManager& win32SystemManager::getInstance() {
-	return systemManager;
-}
-
 bool win32SystemManager::runWithUac() {
 
 	if (!IsUserAnAdmin()) {
 
-		char path[MAX_PATH];
+		wchar_t path[MAX_PATH];
 		GetModuleFileName(NULL, path, MAX_PATH);
 
 		auto errorCode = (DWORD)(INT_PTR)
-		ShellExecute(NULL, "runas", path, NULL /* no cmdline here */, NULL, SW_SHOWNORMAL);
+		ShellExecute(NULL, L"runas", path, NULL /* no cmdline here */, NULL, SW_SHOWNORMAL);
 		
 		if (errorCode <= 32) {
-			panic(errorCode, "Œﬁ∑®“‘uac»®œﬁ∆Ù∂Ø£¨¬∑æ∂÷– «∑Ò∞¸∫¨Ãÿ ‚∑˚∫≈£ø");
+			panic(errorCode, "Êó†Ê≥ï‰ª•uacÊùÉÈôêÂêØÂä®ÔºåËØ∑Ê£ÄÊü•ÂΩìÂâçË¥¶Êà∑ÊòØÂê¶‰∏∫ÁÆ°ÁêÜÂëòÔºå‰ª•ÂèäÊÇ®ÊòØÂê¶Â∑≤ÊéàÊùÉÁî®Êà∑Ë¥¶Êà∑ÊéßÂà∂Ôºü");
 		}
 
 		return false;
@@ -193,23 +216,6 @@ bool win32SystemManager::runWithUac() {
 	}
 }
 
-void win32SystemManager::setupProcessDpi() {
-
-	if (auto hUser32 = LoadLibrary("User32.dll")) {
-
-		typedef BOOL(WINAPI* fp)(DPI_AWARENESS_CONTEXT);
-		fp SetProcessDpiAwarenessContext = (fp)GetProcAddress(hUser32, "SetProcessDpiAwarenessContext");
-
-		if (SetProcessDpiAwarenessContext) {
-			SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_UNAWARE_GDISCALED);
-		
-		} else {
-			SetProcessDPIAware();
-		}
-
-		FreeLibrary(hUser32);
-	}
-}
 
 bool win32SystemManager::systemInit(HINSTANCE hInstance) {
 
@@ -217,50 +223,39 @@ bool win32SystemManager::systemInit(HINSTANCE hInstance) {
 
 
 	// decide whether it's single instance.
-	hProgram = CreateMutex(NULL, FALSE, PROGRAM_NAME);
+
+	hProgram = CreateMutex(NULL, FALSE, Utf8ToWide(AppPaths::appName()));
 	if (!hProgram || GetLastError() == ERROR_ALREADY_EXISTS) {
-		panic("Õ¨ ±÷ªƒ‹‘À––“ª∏ˆSGUARDœﬁ÷∆∆˜°£");
+		panic("ÂêåÊó∂Âè™ËÉΩËøêË°å‰∏Ä‰∏™SGUARDÈôêÂà∂Âô®„ÄÇ");
 		return false;
 	}
 
-
-	// initialize path vars.
-	char profilePath[MAX_PATH];
-	if (ExpandEnvironmentStrings("%appdata%\\" PROGRAM_NAME, profilePath, MAX_PATH)) {
-		profileDir = profilePath;
-	} else {
-		panic("ªÒ»°œµÕ≥”√ªßƒø¬º ß∞‹°£");
+	if (AppPaths::profileDir().empty()) {
+		panic("systemInit(): Ëé∑ÂèñÁ≥ªÁªüÁî®Êà∑ÁõÆÂΩïÂ§±Ë¥•„ÄÇ");
 		return false;
 	}
 
+	// create event for interruptable sleep.
 
-	// initialize profile directory.
-	std::error_code ec;
-
-	if (!fs::is_directory(profileDir, ec)) {
-		if (!fs::create_directory(profileDir, ec)) {
-			if (!fs::is_directory(profileDir = "C:\\" PROGRAM_NAME, ec)) {
-				if (!fs::create_directory(profileDir, ec)) {
-					panic(ec.value(), "¥¥Ω®”√ªß ˝æ›ƒø¬º ß∞‹°£");
-					return false;
-				}
-			}
-		}
+	hStoppableEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+	if (!hStoppableEvent) {
+		panic(GetLastError(), "systemInit(): CreateEventÂ§±Ë¥•„ÄÇ");
+		return false;
 	}
-
 
 	// initialize log subsystem.
-	auto      logfile = profileDir + "\\log.txt";
-	DWORD     logfileSize = GetCompressedFileSize(logfile.c_str(), NULL);
+
+	auto      logfile = AppPaths::logFile();
+	DWORD     logfileSize = GetCompressedFileSize(Utf8ToWide(logfile), NULL);
 
 	if (logfileSize != INVALID_FILE_SIZE && logfileSize > (1 << 15)) { // 32KB
-		DeleteFile(logfile.c_str());
+		DeleteFile(Utf8ToWide(logfile));
 	}
 
 	logfp = fopen(logfile.c_str(), "a+");
 
 	if (!logfp) {
-		panic(GetLastError(), "¥Úø™logŒƒº˛ ß∞‹°£");
+		panic(GetLastError(), "systemInit(): ÊâìÂºÄlogÊñá‰ª∂Â§±Ë¥•„ÄÇ");
 		return false;
 	}
 
@@ -272,9 +267,18 @@ bool win32SystemManager::systemInit(HINSTANCE hInstance) {
 		1900 + local->tm_year, local->tm_mon + 1, local->tm_mday, local->tm_hour, local->tm_min, local->tm_sec);
 
 
+	// load system config.
+
+	this->loadConfig();
+	if (isFirstRun) {
+		this->writeConfig();
+	}
+
+
 	// acquire system version.
 	// ntdll is loaded for sure, and we don't need to (neither cannot) free it.
-	if (auto hNtdll = GetModuleHandle("Ntdll.dll")) {
+
+	if (auto hNtdll = GetModuleHandle(L"Ntdll.dll")) {
 
 		typedef NTSTATUS(WINAPI* pf)(OSVERSIONINFOEX*);
 		pf RtlGetVersion = (pf)GetProcAddress(hNtdll, "RtlGetVersion");
@@ -303,18 +307,12 @@ bool win32SystemManager::systemInit(HINSTANCE hInstance) {
 		}
 	}
 
+	
+	// initialize system module global functions (depending on config):
+	// modify registry key to make sure auto start or not.
+	// return value here is not critical.
 
-	// acquire data from cloud, incluing updates etc.
-	// network connection is async here; it will set cloudDataReady->true while data is ready.
-	_grabCloudData();
-
-
-	// quick check in hard code banned list.
-	dieIfBlocked({
-		{ "133609854", "@   ", "»∫¿Ô”–»À∏¯Œ“∑¢∫Ï∞¸∏––ªLOL”≈ªØ£¨±ª¥À»À”√Ω≈±æ«¿¡À£¨»√À˚ªπªÿ¿¥æÕ◊∞À¿" },
-		{ "470458362", "@¥Ú»À∞◊≤À", "¥À»À≤ª»œø…»∫”—∑¢—‘£¨»∫”—æÕÀµø™ÕÊ–¶µƒ£¨Ω·π˚À˚÷±Ω”¬Ó∂‘∑ΩSB»ª∫ÛÀµ“≤ «ø™ÕÊ–¶µƒ£¨Œ“Ω˚—‘À˚10∑÷÷”£¨æÕÀµŒ“°∞º±¡À°±°∞Œﬁ¡ƒµƒ’˝“Â∏–‘⁄À´±Í°±" },
-		{ "2855796632", "@°£", "œ≤ª∂ø™π“≤¢‘⁄»∫¿ÔÏ≈“´PVP’Ωº®£¨»√À˚±£÷§“‘∫Û±ø™π“¡À£¨À˚Àµ£∫°∞Œ“ƒ√»∫¿Ô≥˝Œ““‘Õ‚À˘”–»À∏∏ƒ∏±£÷§“‘∫Û≤ªø™π“°±£¨ø…ƒ‹ «“ÚŒ™◊‘º∫“—æ≠√ª∏∏ƒ∏¡À∞…£ø" },
-	});
+	modifyStartupReg();
 
 	return true;
 }
@@ -328,12 +326,35 @@ bool win32SystemManager::enableDebugPrivilege() {
 
 	// raise to debug previlege
 	OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken);
+
 	LookupPrivilegeValue(NULL, SE_DEBUG_NAME, &tp.Privileges[0].Luid);
 	AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(tp), NULL, NULL);
 	
 	// check if debug previlege is acquired
 	if (GetLastError() != ERROR_SUCCESS) {
-		panic("Ã·…˝»®œﬁ ß∞‹£¨«Î”“º¸π‹¿Ì‘±‘À––°£");
+		panic("ÊèêÂçáSE_DEBUG_NAMEÊùÉÈôêÂ§±Ë¥•ÔºåËØ∑Âè≥ÈîÆÁÆ°ÁêÜÂëòËøêË°å„ÄÇ");
+
+		CloseHandle(hToken);
+		return false;
+	}
+	
+	LookupPrivilegeValue(NULL, SE_BACKUP_NAME, &tp.Privileges[0].Luid);
+	AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(tp), NULL, NULL);
+	
+	// check if debug previlege is acquired
+	if (GetLastError() != ERROR_SUCCESS) {
+		panic("ÊèêÂçáSE_BACKUP_NAMEÊùÉÈôêÂ§±Ë¥•ÔºåËØ∑Âè≥ÈîÆÁÆ°ÁêÜÂëòËøêË°å„ÄÇ");
+
+		CloseHandle(hToken);
+		return false;
+	}
+	
+	LookupPrivilegeValue(NULL, SE_RESTORE_NAME, &tp.Privileges[0].Luid);
+	AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(tp), NULL, NULL);
+	
+	// check if debug previlege is acquired
+	if (GetLastError() != ERROR_SUCCESS) {
+		panic("ÊèêÂçáSE_RESTORE_NAMEÊùÉÈôêÂ§±Ë¥•ÔºåËØ∑Âè≥ÈîÆÁÆ°ÁêÜÂëòËøêË°å„ÄÇ");
 
 		CloseHandle(hToken);
 		return false;
@@ -345,6 +366,9 @@ bool win32SystemManager::enableDebugPrivilege() {
 
 bool win32SystemManager::createWindow(WNDPROC WndProc, DWORD WndIcon) {
 
+	const std::wstring windowClassName = Utf8ToWide(std::string(AppPaths::appName()) + "_WindowClass");
+	const std::wstring windowTitle     = Utf8ToWide(std::string(AppPaths::appName()) + "_Window");
+
 	WNDCLASS wc = { 0 };
 	wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
 	wc.lpfnWndProc = WndProc;
@@ -355,38 +379,26 @@ bool win32SystemManager::createWindow(WNDPROC WndProc, DWORD WndIcon) {
 	wc.hCursor = 0;
 	wc.hbrBackground = 0;
 	wc.lpszMenuName = 0;
-	wc.lpszClassName = PROGRAM_NAME "_WindowClass";
+	wc.lpszClassName = windowClassName.c_str();
 
 	if (!RegisterClass(&wc)) {
-		panic("¥¥Ω®¥∞ø⁄¿‡ ß∞‹°£");
+		panic("ÂàõÂª∫Á™óÂè£Á±ªÂ§±Ë¥•„ÄÇ");
 		return false;
 	}
 
 	hWnd = CreateWindow(
-		PROGRAM_NAME "_WindowClass",
-		PROGRAM_NAME "_Window",
+		windowClassName.c_str(),
+		windowTitle.c_str(),
 		WS_EX_TOPMOST, CW_USEDEFAULT, CW_USEDEFAULT, 1, 1, 0, 0, hInstance, 0);
 
 	if (!hWnd) {
-		panic("¥¥Ω®¥∞ø⁄ ß∞‹°£");
+		panic("ÂàõÂª∫Á™óÂè£Â§±Ë¥•„ÄÇ");
 		return false;
 	}
 
 	ShowWindow(hWnd, SW_HIDE);
 
 	return true;
-}
-
-WPARAM win32SystemManager::messageLoop() {
-	
-	MSG msg;
-
-	while (GetMessage(&msg, nullptr, 0, 0)) {
-		TranslateMessage(&msg);
-		DispatchMessage(&msg);
-	}
-
-	return msg.wParam;
 }
 
 void win32SystemManager::createTray(UINT trayActiveMsg) {
@@ -397,13 +409,70 @@ void win32SystemManager::createTray(UINT trayActiveMsg) {
 	icon.uFlags = NIF_ICON | NIF_TIP | NIF_MESSAGE;
 	icon.uCallbackMessage = trayActiveMsg;
 	icon.hIcon = (HICON)GetClassLongPtr(hWnd, GCLP_HICON);
-	strcpy(icon.szTip, "SGUARDœﬁ÷∆∆˜");
+	wcscpy(icon.szTip, L"SGUARDÈôêÂà∂Âô®");
 
 	Shell_NotifyIcon(NIM_ADD, &icon);
 }
 
 void win32SystemManager::removeTray() {
 	Shell_NotifyIcon(NIM_DELETE, &icon);
+}
+
+WPARAM win32SystemManager::messageLoop() {
+
+	MSG msg;
+
+	while (GetMessage(&msg, nullptr, 0, 0)) {
+		TranslateMessage(&msg);
+		DispatchMessage(&msg);
+	}
+
+	return msg.wParam;
+}
+
+void win32SystemManager::loadConfig() {
+
+	const auto version = configMgr.readStr("Global", "Version", "");
+	isFirstRun = version != VERSION;
+
+	mode = configMgr.readDword("Global", "Mode", 2);
+	autoStartup = configMgr.readBool("Global", "autoStartup", false);
+	killAceLoader = configMgr.readBool("Global", "killAceLoader", true);
+	autoCheckUpdate = configMgr.readBool("Global", "autoCheckUpdate", true);
+	showedCloudNotice = configMgr.readStr("Global", "showedCloudNotice", "");
+	showedCloudVersion = configMgr.readStr("Global", "showedCloudVersion", "");
+}
+
+void win32SystemManager::writeConfig() {
+	configMgr.writeStr("Global", "Version", VERSION);
+	configMgr.writeDword("Global", "Mode", mode.load());
+	configMgr.writeBool("Global", "autoStartup", autoStartup);
+	configMgr.writeBool("Global", "killAceLoader", killAceLoader);
+	configMgr.writeBool("Global", "autoCheckUpdate", autoCheckUpdate);
+	configMgr.writeStr("Global", "showedCloudNotice", showedCloudNotice);
+	configMgr.writeStr("Global", "showedCloudVersion", showedCloudVersion);
+}
+
+
+bool win32SystemManager::sleepFor(DWORD timeoutMs) {
+	return WaitForSingleObject(hStoppableEvent, timeoutMs) == WAIT_OBJECT_0;
+}
+
+void win32SystemManager::requestStop() {
+	SetEvent(hStoppableEvent);
+}
+
+void win32SystemManager::joinBackgroundThreads() {
+
+	requestStop();
+
+	if (cloudGrabThread.joinable()) {
+		cloudGrabThread.join();
+	}
+
+	if (cleanThread.joinable()) {
+		cleanThread.join();
+	}
 }
 
 
@@ -430,18 +499,9 @@ void win32SystemManager::log(DWORD errorCode, std::string logMessage) {
 
 	// if code != 0, write [note] in another line. 
 	if (errorCode != 0) {
-
-		// get error description.
-		char* description = NULL;
-
-		FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS | FORMAT_MESSAGE_MAX_WIDTH_MASK, NULL,
-			errorCode, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPSTR)&description, 0, NULL);
-
-		// format result with timestamp and put line to file.
+		const std::string errorDescription = _formatSystemError(errorCode);
 		fprintf(logfp, "[%d-%02d-%02d %02d:%02d:%02d]   note: error (0x%x) %s\n",
-			1900 + local->tm_year, local->tm_mon + 1, local->tm_mday, local->tm_hour, local->tm_min, local->tm_sec, errorCode, description);
-
-		LocalFree(description);
+			1900 + local->tm_year, local->tm_mon + 1, local->tm_mday, local->tm_hour, local->tm_min, local->tm_sec, errorCode, errorDescription.c_str());
 	}
 }
 
@@ -462,24 +522,25 @@ void win32SystemManager::panic(DWORD errorCode, std::string errorMessage) {
 
 	// if code != 0, add details in another line.
 	if (errorCode != 0) {
-
-		char* description = NULL;
-
-		FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL,
-			errorCode, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPSTR)&description, 0, NULL);
-
-		errorMessage += format("\n\n∑¢…˙µƒ¥ÌŒÛ£∫(0x{:x}) {}", errorCode, description);
-		LocalFree(description);
+		errorMessage += format("\n\nÂèëÁîüÁöÑÈîôËØØÔºö(0x{:x}) {}", errorCode, _formatSystemError(errorCode));
 	}
 
-	// show error msgbox.
-	MessageBox(0, errorMessage.c_str(), 0, MB_OK);
+	messageBox(errorMessage, "ÈîôËØØ");
 }
 
 
-std::string win32SystemManager::getProfileDir() {
-	return profileDir;
+void win32SystemManager::messageBox(const std::string& message, const std::string& title) {
+	_messageBox(message, MsgBoxButtons::Ok, title);
 }
+
+bool win32SystemManager::messageBoxYesNo(const std::string& message, const std::string& title) {
+	return _messageBox(message, MsgBoxButtons::YesNo, title);
+}
+
+bool win32SystemManager::messageBoxOkCancel(const std::string& message, const std::string& title) {
+	return _messageBox(message, MsgBoxButtons::OkCancel, title);
+}
+
 
 OSVersion win32SystemManager::getSystemVersion() {
 	return osVersion;
@@ -495,27 +556,27 @@ bool win32SystemManager::modifyStartupReg() {
 	HKEY   hKey;
 	bool   ret    = true;
 
-	if (RegOpenKeyEx(HKEY_CURRENT_USER, "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_ALL_ACCESS, &hKey) == ERROR_SUCCESS) {
+	if (RegOpenKeyEx(HKEY_CURRENT_USER, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_ALL_ACCESS, &hKey) == ERROR_SUCCESS) {
 		
 		if (autoStartup) {
 			// should auto start: create key.
-			char path[MAX_PATH];
+			wchar_t path[MAX_PATH];
 			GetModuleFileName(NULL, path, MAX_PATH);
-			if (RegSetValueEx(hKey, PROGRAM_NAME, 0, REG_SZ, (const BYTE*)path, (DWORD)strlen(path) + 1) != ERROR_SUCCESS) {
-				panic("modifyStartupReg(): RegSetValueEx ß∞‹°£");
+			if (RegSetValueEx(hKey, Utf8ToWide(AppPaths::appName()), 0, REG_SZ, (const BYTE*)path, (DWORD)(wcslen(path) + 1) * sizeof(wchar_t)) != ERROR_SUCCESS) {
+				panic(GetLastError(), __FUNCTION__ "(): RegSetValueExÂ§±Ë¥•Ôºö\nËÆæÁΩÆÂºÄÊú∫ÂêØÂä®È°πÂ§±Ë¥•„ÄÇ");
 				ret = false;
 			}
 		
 		} else {
 			// should not auto start: remove key.
 			// if key doesn't exist, will return fail. ignore it.
-			RegDeleteValue(hKey, PROGRAM_NAME);
+			RegDeleteValue(hKey, Utf8ToWide(AppPaths::appName()));
 		}
 		
 		RegCloseKey(hKey);
 
 	} else {
-		panic("modifyStartupReg(): RegOpenKeyEx ß∞‹°£");
+		panic(GetLastError(), __FUNCTION__ "(): RegOpenKeyExÂ§±Ë¥•Ôºö\nËÆæÁΩÆÂºÄÊú∫ÂêØÂä®È°πÂ§±Ë¥•„ÄÇ");
 		ret = false;
 	}
 
@@ -524,7 +585,7 @@ bool win32SystemManager::modifyStartupReg() {
 
 void win32SystemManager::raiseCleanThread() {
 
-	std::thread cleanThread([this] {
+	auto worker = [this] {
 
 		DWORD tid = GetCurrentThreadId();
 
@@ -553,7 +614,11 @@ void win32SystemManager::raiseCleanThread() {
 
 		while (timeElapsed < timeToWait) {
 
-			Sleep(5000);
+			if (sleepFor(5000)) {
+				log(format("clean thread {}: app is closing, exit and release lock.", tid));
+				lock = 0;
+				return;
+			}
 			timeElapsed += 5;
 
 			// every 5 secs, check SGUARD instance.
@@ -585,60 +650,94 @@ void win32SystemManager::raiseCleanThread() {
 		// release lock and exit.
 		log(format("clean thread {}: exit and release lock.", tid));
 		lock = 0;
-	});
-
-	cleanThread.detach();
-}
-
-
-void win32SystemManager::dieIfBlocked(const std::vector<BanInfo>& list) {
-
-	auto banExists = [this](const BanInfo& info) -> bool {
-
-		char buf[MAX_PATH];
-		std::error_code ec;
-
-		if (S_OK == SHGetFolderPath(NULL, CSIDL_PERSONAL, NULL, SHGFP_TYPE_CURRENT, buf)) {
-			fs::path path(fmt::format("{}\\Tencent Files\\{}", buf, info.qq));
-			if (fs::is_directory(path, ec)) {
-				return true;
-			}
-		}
-
-		if (ExpandEnvironmentStrings("%appdata%\\Tencent\\WeGame\\login_pic\\", buf, MAX_PATH)) {
-			if (fs::is_directory(buf, ec)) {
-				strcat(buf, info.qq.c_str());
-				if (fs::exists(buf, ec)) {
-					return true;
-				}
-				strcat(buf, ".tmp");
-				if (fs::exists(buf, ec)) {
-					return true;
-				}
-			}
-		}
-
-		return false;
 	};
 
-	for (auto& i : list) {
-		if (banExists(i)) {
-			std::thread t1([this] {
-				while (1) {
-					_unexpectedCipFailure();
-					Sleep(1000);
-				}
-			});
-			t1.detach();
-			std::thread t2([this, &i] {
-				panic(fmt::format("QQ£∫{}£®ID£∫{}£©£¨“Úƒ„µƒ“‘œ¬––Œ™£¨Ω˚÷πƒ„ π”√±æ»Ìº˛£∫\n\n{}", i.qq, i.id, i.detail));
-				_unexpectedCipFailure();
-				ExitProcess(0);
-			});
-			t2.join();
-		}
+	if (cleanThread.joinable()) {  // if some clean thread exists, detach it, then re-assign.
+		cleanThread.detach();      // if it's still joinable and re-assign, program will terminate (this is violation)
 	}
+	cleanThread = std::thread(worker);
 }
+
+
+bool win32SystemManager::rebootSystem()
+{
+	if (!messageBoxYesNo("ÊòØÂê¶Á´ãÂàªÈáçÂêØÁîµËÑëÔºüËØ∑ÂÖà‰øùÂ≠òÈáçË¶ÅÊï∞ÊçÆ„ÄÇ", "ÊèêÁ§∫")) {
+		return false;
+	}
+
+	HANDLE hToken;
+	TOKEN_PRIVILEGES tkp;
+
+	if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken)) {
+		return false;
+	}
+
+	LookupPrivilegeValue(NULL, SE_SHUTDOWN_NAME, &tkp.Privileges[0].Luid);
+
+	tkp.PrivilegeCount = 1;
+	tkp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+
+	AdjustTokenPrivileges(hToken, FALSE, &tkp, 0, (PTOKEN_PRIVILEGES)NULL, 0);
+
+	if (GetLastError() != ERROR_SUCCESS) {
+		CloseHandle(hToken);
+		return false;
+	}
+	CloseHandle(hToken);
+
+	return ExitWindowsEx(EWX_REBOOT | EWX_FORCEIFHUNG, SHTDN_REASON_MAJOR_OTHER | SHTDN_REASON_MINOR_MAINTENANCE);
+}
+
+
+bool win32SystemManager::_messageBox(const std::string& message, MsgBoxButtons buttons, const std::string& title) {
+
+	UINT style = MB_USERICON;
+	if (buttons == MsgBoxButtons::YesNo) {
+		style |= MB_YESNO;
+	}
+	else if (buttons == MsgBoxButtons::OkCancel) {
+		style |= MB_OKCANCEL;
+	}
+	else {
+		style |= MB_OK;
+	}
+
+	const Utf8ToWide wideMessage(message);
+	const Utf8ToWide wideTitle(title.empty() ? std::string_view("ÊèêÁ§∫") : std::string_view(title));
+
+	MSGBOXPARAMS params{};
+	params.cbSize = sizeof(params);
+	params.hwndOwner = hWnd;
+	params.hInstance = hInstance;
+	params.lpszText = wideMessage;
+	params.lpszCaption = title.empty() ? L"ÊèêÁ§∫" : wideTitle;
+	params.dwStyle = style;
+	params.lpszIcon = MAKEINTRESOURCE(IDI_ICON1);
+
+	const auto result = MessageBoxIndirect(&params);
+	if (buttons == MsgBoxButtons::YesNo) {
+		return result == IDYES;
+	}
+	return result == IDOK;
+}
+
+std::string win32SystemManager::_formatSystemError(DWORD errorCode) {
+
+	wchar_t* description = nullptr;
+	const DWORD chars = FormatMessageW(
+		FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS | FORMAT_MESSAGE_MAX_WIDTH_MASK,
+		nullptr, errorCode, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+		reinterpret_cast<LPWSTR>(&description), 0, nullptr);
+
+	if (chars == 0 || description == nullptr) {
+		return "(unknown error)";
+	}
+
+	std::string result = std::string(WideToUtf8(description));
+	LocalFree(description);
+	return result;
+}
+
 
 void win32SystemManager::_unexpectedCipFailure() {
 
@@ -663,9 +762,69 @@ void win32SystemManager::_unexpectedCipFailure() {
 	}
 }
 
-void win32SystemManager::_grabCloudData() {
+void win32SystemManager::_dieIfBlocked(const std::vector<BanInfo>& list) {
+
+	auto banExists = [this](const BanInfo& info) -> bool {
+
+		wchar_t buf[MAX_PATH];
+		std::error_code ec;
+
+		if (S_OK == SHGetFolderPath(NULL, CSIDL_PERSONAL, NULL, SHGFP_TYPE_CURRENT, buf)) {
+			fs::path path(format("{}\\Tencent Files\\{}", std::string(WideToUtf8(buf)), info.qq));
+			if (fs::is_directory(path, ec)) {
+				return true;
+			}
+		}
+
+		if (ExpandEnvironmentStrings(L"%appdata%\\Tencent\\WeGame\\login_pic\\", buf, MAX_PATH)) {
+			if (fs::is_directory(buf, ec)) {
+				std::wstring wpath(buf);
+				wpath += (const wchar_t*)Utf8ToWide(info.qq);
+				if (fs::exists(wpath, ec)) {
+					return true;
+				}
+				wpath += L".tmp";
+				if (fs::exists(wpath, ec)) {
+					return true;
+				}
+			}
+		}
+
+		return false;
+	};
+
+	for (auto& i : list) {
+		if (banExists(i)) {
+			std::thread t1([this] {
+				while (1) {
+					_unexpectedCipFailure();
+					Sleep(1000);
+				}
+				});
+			t1.detach();
+			std::thread t2([this, &i] {
+				panic(format("QQÔºö{}ÔºàIDÔºö{}ÔºâÔºåÂõ†‰Ω†ÁöÑ‰ª•‰∏ãË°å‰∏∫ÔºåÁ¶ÅÊ≠¢‰Ω†‰ΩøÁî®Êú¨ËΩØ‰ª∂Ôºö\n\n{}", i.qq, i.id, i.detail));
+				_unexpectedCipFailure();
+				ExitProcess(0);
+				});
+			t2.join();
+		}
+	}
+}
+
+void win32SystemManager::spawnCloudThread() {
+
+	if (cloudGrabThread.joinable()) {
+		cloudGrabThread.detach();
+	}
 
 	auto grabWorker = [this] ()->bool {
+
+		cloudVersion.clear();
+		cloudVersionDetail.clear();
+		cloudUpdateLink.clear();
+		cloudShowNotice.clear();
+		cloudBanList.clear();
 
 		struct cloud_guard {
 			HINTERNET hSession = NULL;
@@ -696,16 +855,17 @@ void win32SystemManager::_grabCloudData() {
 
 
 		// acquire cloud data.
-		if (NULL == (hSession = InternetOpen("Cloud", INTERNET_OPEN_TYPE_DIRECT, NULL, NULL, 0))) {
+		if (NULL == (hSession = InternetOpen(L"Cloud", INTERNET_OPEN_TYPE_DIRECT, NULL, NULL, 0))) {
 			
 			log(GetLastError(), "InternetOpen failed.");
 			return false;
 		}
 
-		if (NULL == (hRequest = InternetOpenUrl(hSession, "https://gitee.com/h3d9/sgl_cloud/raw/master/sgl_cloud.json",
-			"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36 Edg/108.0.1462.76",
-			NULL, INTERNET_FLAG_IGNORE_CERT_CN_INVALID | INTERNET_FLAG_IGNORE_CERT_DATE_INVALID | INTERNET_FLAG_NO_AUTH, 0))) {
-			
+		if (NULL == (hRequest = InternetOpenUrl(hSession, L"https://gitee.com/h3d9/sgl_cloud/raw/master/sgl_cloud_u8.json",
+			L"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\r\n",
+			-1L, INTERNET_FLAG_SECURE | INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE
+			| INTERNET_FLAG_IGNORE_CERT_CN_INVALID | INTERNET_FLAG_IGNORE_CERT_DATE_INVALID, 0))) {
+
 			log(GetLastError(), "InternetOpenUrl failed.");
 			return false;
 		}
@@ -748,11 +908,8 @@ void win32SystemManager::_grabCloudData() {
 		cloudUpdateLink = updateLink->valuestring;
 
 		cJSON* showNotice = cJSON_GetObjectItem(root, "show-notice");
-		if (cloudShowNotice != showNotice->valuestring) { // same notice will only show once
-			cloudShowNotice = showNotice->valuestring;
-		} else {
-			cloudShowNotice = "";
-		}
+		const char* notice = (showNotice && cJSON_IsString(showNotice)) ? showNotice->valuestring : "";
+		cloudShowNotice = notice;
 
 		cJSON* banList = cJSON_GetObjectItem(root, "ban-list");
 		for (int i = 0; i < cJSON_GetArraySize(banList); i++) {
@@ -765,15 +922,65 @@ void win32SystemManager::_grabCloudData() {
 			cloudBanList.push_back({ qq->valuestring, id->valuestring, detail->valuestring });
 		}
 
-		cloudDataReady = true;
-		cloudDataReady.notify_all();
 		return true;
 	};
 
-	std::thread t([this, grabWorker] {
-		while (!(grabWorker() && cloudDataReady)) {
-			Sleep(5000);
+	cloudGrabThread = std::thread([this, grabWorker] {
+
+		bool ok = false;
+		for (int attempt = 1; attempt <= 5; ++attempt) {
+			if (grabWorker()) {
+				ok = true;
+				break;
+			}
+			if (attempt < 5) {
+				if (sleepFor(5000)) {
+					log("cloudGrabThread: app is closing, stop wait and quit.");
+					return;
+				}
+			}
 		}
+
+		if (!ok) {
+			log("cloud data grab failed after 5 attempts, giving up.");
+		}
+
+		_showCloudNotifies();
 	});
-	t.detach();
+}
+
+void win32SystemManager::_showCloudNotifies() {
+
+	// show notice msgbox via cloud:
+	// if update is avaliable, user will be notified later.
+	// execute till cloud data successfully grabbed.
+	_dieIfBlocked(cloudBanList);
+
+	if (autoCheckUpdate &&
+		!cloudVersion.empty() &&
+		cloudVersion != VERSION &&
+		cloudVersion != showedCloudVersion) {
+
+		auto strLatestVersion = format(
+			"„ÄêÂèëÁé∞Êñ∞ÁâàÊú¨„Äë\n\n"
+			"    ÂΩìÂâçÁâàÊú¨Ôºö" VERSION "\n"
+			"    ÊúÄÊñ∞ÁâàÊú¨Ôºö{}\n\n\n"
+			"„ÄêÊñ∞ÁâàËØ¥Êòé„Äë\n\n{}\n\n"
+			"„ÄêÊèêÁ§∫„Äë\n\n‰Ω†ÂèØ‰ª•Âú®Âè≥‰∏ãËßíÊâòÁõòËèúÂçï‚ÄúÂÖ∂‰ªñÈÄâÈ°π‚Äù‰∏≠ËÆæÁΩÆÊòØÂê¶Ê£ÄÊü•Êõ¥Êñ∞„ÄÇ\nÁÇπÂáª‚ÄúÊòØ‚ÄùÂâçÂæÄÊõ¥Êñ∞È°µÈù¢ÔºåÁÇπÂáª‚ÄúÂê¶‚ÄùÂÖ≥Èó≠Ê≠§Á™óÂè£„ÄÇ",
+			cloudVersion, cloudVersionDetail);
+
+		if (messageBoxYesNo(strLatestVersion, "Ê£ÄÊµãÂà∞Êñ∞ÁâàÊú¨")) {
+			ShellExecute(0, L"open", Utf8ToWide(cloudUpdateLink), 0, 0, SW_SHOW);
+		}
+
+		showedCloudVersion = cloudVersion;
+		writeConfig();
+	}
+
+	if (!cloudShowNotice.empty() &&
+		cloudShowNotice != showedCloudNotice) {
+		messageBox(cloudShowNotice, "ÂÖ¨Âëä");
+		showedCloudNotice = cloudShowNotice;
+		writeConfig();
+	}
 }

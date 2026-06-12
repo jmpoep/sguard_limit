@@ -1,83 +1,183 @@
-// Memory Patch£¨ÓÃ»§Ì¬Ä£¿é£©
-// 2021.10.4 Óê
-// ×òÌì³Ô»µ¶Ç×ÓÁË£¬ºÜÌÛ¡£µ«ÊÇ 2.2 ¸´¿ÌºúÌÒ£¬¿ªĞÄ¡£
+ï»¿// Memory Patchï¼ˆç”¨æˆ·æ€æ¨¡å—ï¼‰
+// 2021.10.4 é›¨
+// æ˜¨å¤©åƒåè‚šå­äº†ï¼Œå¾ˆç–¼ã€‚ä½†æ˜¯ 2.2 å¤åˆ»èƒ¡æ¡ƒï¼Œå¼€å¿ƒã€‚
 // 2021.11.27 24:00
-// ´ó³ÇÊĞµÄ½¼ÇøÓĞ×ÅÃ÷ÁÁµÄÔÂÁÁ¡£Ã÷ÌìµÄÂ¶Ë®ÔÚÇ½ÉÏÄı½á¡£
-// 2022.11.2 21:00 Óê
-// Ëı¶ÔÎÒËµ£º¡ºÎÒµÈÄãºÃ¾ÃÀ²¡£¡»
+// å¤§åŸå¸‚çš„éƒŠåŒºæœ‰ç€æ˜äº®çš„æœˆäº®ã€‚æ˜å¤©çš„éœ²æ°´åœ¨å¢™ä¸Šå‡ç»“ã€‚
+// 2022.11.2 21:00 é›¨
+// [å·²åˆ é™¤]
 // 2023.3.1 23:10
-// ¡ºÈıÇ§ÊÀ½çÖĞ£¬ÓÖÓĞĞ¡Ğ¡ÊÀ½ç¡£ËùÓĞÃüÔË£¬½ÔÔÚ´Ë¼ä·ĞÌÚ¡£¡»
-// ¡ºÎÒÖğ½¥Ã÷°×£¬ÕâĞ©²»¿É±»ÃèÊö¶øÓÖºã¾Ã±ä»¯Ö®Îï£¬²ÅÊÇÊÀ¼ä×îÉî°ÂµÄ¶«Î÷¡£¡»
+// [è®°å¿†æŸå]
+// 2025.3.24 13:00
+// å‡å¦‚æ„¿æœ›æ˜¯å¤©ç©ºä¸­ç‰‡ç‰‡äº‘æœµï¼Œç»ˆæœ‰ä¸€æ—¥åŒ–ä½œé›¨æ°´è½å›å¤§åœ°â€¦
+// ä½ ã€æˆ‘ã€å¥¹æ‰€æ²æµ´çš„é›¨ï¼Œåˆæœ‰ä»€ä¹ˆåˆ†åˆ«å‘¢ï¼Ÿ
+// 2026.6.8 24:00
+// å¦‚æœæ³¨æ„åŠ›å¹¶ä¸æ˜¯é€šå¾€AGIçš„é’¥åŒ™ï¼Œé‚£æˆ‘ä»¬åˆ°åº•è¿˜ç¼ºä»€ä¹ˆå‘¢ï¼Ÿ
+
 #include <Windows.h>
 #include <memory>      // std::unique_ptr
 #include "mempatch.h"
 
 // dependencies
 #include "kdriver.h"
-#include "win32utility.h"
+#include "config.h"
+#include "win32utility.h"  // tiny::format
 
 extern KernelDriver&          driver;
+extern ConfigManager&         configMgr;
 extern win32SystemManager&    systemMgr;
 
 
+// mempatch internal impl
+
+namespace {
+
+struct kdriver_guard {
+
+	bool      VadChanged   = false;
+	DWORD     PidSuspended = 0;
+	result_t  execStatus;  // (std/tl::)expected default ctor = use expected value's default initialize.
+
+	~kdriver_guard() {
+
+		// release target.
+		result_t exitStatus;
+
+		if (VadChanged) {
+			if (!(exitStatus = driver.restoreVad())) {
+				systemMgr.panic(exitStatus.error());
+			}
+		}
+		if (PidSuspended != 0) {
+			if (!(exitStatus = driver.resume(PidSuspended))) {
+				systemMgr.panic(exitStatus.error());
+			}
+		}
+
+		// show driver error if exists.
+		if (!execStatus) {
+			systemMgr.panic(execStatus.error());
+		}
+	}
+};
+
+} // namespace
+
+
 // mempatch module
-PatchManager  PatchManager::patchManager;
 
 PatchManager::PatchManager()
-	: patchEnabled(true), patchPid(0),
-	  patchSwitches{}, patchStatus{}, patchDelay{},
-	  patchDelayRange {
+	: patchDelayRange {
 	   { 1,   1500, 2000 },   /* NtQueryVirtualMemory */
 	   { 1,   500,  1000 },   /* GetAsyncKeyState */
 	   { 1,   50,   100  },   /* NtWaitForSingleObject */
 	   { 500, 1250, 2000 },   /* NtDelayExecution */
 	   { 1,   300,  1500 }    /* DeviceIoControl_1x */
-	  }, 
-	  patchDelayBeforeNtdlletc(20),
-	  syscallTable{} {}
+	  } {}
 
-PatchManager& PatchManager::getInstance() {
-	return patchManager;
+void PatchManager::loadConfig() {
+
+	patchDelayBeforeNtdlletc            = configMgr.readDword("Patch", "DelayBeforeNtdlletc",   45);
+	patchSwitches.NtQueryVirtualMemory  = configMgr.readBool("Patch",  "NtQueryVirtualMemory",  true);
+	patchSwitches.NtReadVirtualMemory   = configMgr.readBool("Patch",  "NtReadVirtualMemory",   true);
+	patchSwitches.GetAsyncKeyState      = configMgr.readBool("Patch",  "GetAsyncKeyState",      true);
+	patchSwitches.NtWaitForSingleObject = configMgr.readBool("Patch",  "NtWaitForSingleObject", false);
+	patchSwitches.NtDelayExecution      = configMgr.readBool("Patch",  "NtDelayExecution",      false);
+	patchSwitches.DeviceIoControl_1     = configMgr.readBool("Patch",  "DeviceIoControl_1",     true);
+	patchSwitches.DeviceIoControl_1x    = configMgr.readBool("Patch",  "DeviceIoControl_1x",    true);
+	patchSwitches.DeviceIoControl_2     = configMgr.readBool("Patch",  "DeviceIoControl_2",     true);
+
+	auto defDelay = [this] (auto i) { return patchDelayRange[i].def; };
+
+	patchDelay[0] = configMgr.readDword("Patch", "Delay0", defDelay(0));
+	patchDelay[1] = configMgr.readDword("Patch", "Delay1", defDelay(1));
+	patchDelay[2] = configMgr.readDword("Patch", "Delay2", defDelay(2));
+	patchDelay[3] = configMgr.readDword("Patch", "Delay3", defDelay(3));
+	patchDelay[4] = configMgr.readDword("Patch", "Delay4", defDelay(4));
+} 
+
+void PatchManager::writeConfig() {
+
+	configMgr.writeDword("Patch", "DelayBeforeNtdlletc",   patchDelayBeforeNtdlletc.load());
+	configMgr.writeBool("Patch",  "NtQueryVirtualMemory",  patchSwitches.NtQueryVirtualMemory.load());
+	configMgr.writeBool("Patch",  "NtReadVirtualMemory",   patchSwitches.NtReadVirtualMemory.load());
+	configMgr.writeBool("Patch",  "GetAsyncKeyState",      patchSwitches.GetAsyncKeyState.load());
+	configMgr.writeBool("Patch",  "NtWaitForSingleObject", patchSwitches.NtWaitForSingleObject.load());
+	configMgr.writeBool("Patch",  "NtDelayExecution",      patchSwitches.NtDelayExecution.load());
+	configMgr.writeBool("Patch",  "DeviceIoControl_1",     patchSwitches.DeviceIoControl_1.load());
+	configMgr.writeBool("Patch",  "DeviceIoControl_1x",    patchSwitches.DeviceIoControl_1x.load());
+	configMgr.writeBool("Patch",  "DeviceIoControl_2",     patchSwitches.DeviceIoControl_2.load());
+	configMgr.writeDword("Patch", "Delay0",                patchDelay[0].load());
+	configMgr.writeDword("Patch", "Delay1",                patchDelay[1].load());
+	configMgr.writeDword("Patch", "Delay2",                patchDelay[2].load());
+	configMgr.writeDword("Patch", "Delay3",                patchDelay[3].load());
+	configMgr.writeDword("Patch", "Delay4",                patchDelay[4].load());
+}
+
+void PatchManager::_applyDefaultConfig() {
+
+	patchDelayBeforeNtdlletc = 45;
+
+	patchSwitches.NtQueryVirtualMemory = true;
+	patchSwitches.NtReadVirtualMemory = true;
+	patchSwitches.GetAsyncKeyState = true;
+	patchSwitches.NtWaitForSingleObject = false;
+	patchSwitches.NtDelayExecution = false;
+	patchSwitches.DeviceIoControl_1 = true;
+	patchSwitches.DeviceIoControl_1x = true;
+	patchSwitches.DeviceIoControl_2 = true;
+
+	auto defDelay = [this](auto i) { return patchDelayRange[i].def; };
+
+	patchDelay[0] = defDelay(0);
+	patchDelay[1] = defDelay(1);
+	patchDelay[2] = defDelay(2);
+	patchDelay[3] = defDelay(3);
+	patchDelay[4] = defDelay(4);
 }
 
 
 bool PatchManager::init() {
-	
-	bool ret = true;
+
+	this->loadConfig();
+	if (systemMgr.isFirstRun) {
+		_applyDefaultConfig();  // reset user config when updated
+		this->writeConfig();
+	}
+
 
 	// acquire syscall numbers we need.
-	syscallTable["NtQueryVirtualMemory"]   = _getSyscallNumber("NtQueryVirtualMemory",  "Ntdll.dll");
-	syscallTable["NtReadVirtualMemory"]    = _getSyscallNumber("NtReadVirtualMemory",   "Ntdll.dll");
-	syscallTable["NtWaitForSingleObject"]  = _getSyscallNumber("NtWaitForSingleObject", "Ntdll.dll");
-	syscallTable["NtDelayExecution"]       = _getSyscallNumber("NtDelayExecution",      "Ntdll.dll");
-	syscallTable["NtDeviceIoControlFile"]  = _getSyscallNumber("NtDeviceIoControlFile", "Ntdll.dll");
-	syscallTable["NtFsControlFile"]        = _getSyscallNumber("NtFsControlFile",       "Ntdll.dll");
+	syscallTable["NtQueryVirtualMemory"]   = _getSyscallNumber("NtQueryVirtualMemory",  L"Ntdll.dll");
+	syscallTable["NtReadVirtualMemory"]    = _getSyscallNumber("NtReadVirtualMemory",   L"Ntdll.dll");
+	syscallTable["NtWaitForSingleObject"]  = _getSyscallNumber("NtWaitForSingleObject", L"Ntdll.dll");
+	syscallTable["NtDelayExecution"]       = _getSyscallNumber("NtDelayExecution",      L"Ntdll.dll");
+	syscallTable["NtDeviceIoControlFile"]  = _getSyscallNumber("NtDeviceIoControlFile", L"Ntdll.dll");
+	syscallTable["NtFsControlFile"]        = _getSyscallNumber("NtFsControlFile",       L"Ntdll.dll");
 
 	if (systemMgr.getSystemVersion() == OSVersion::WIN_10_11) {
-		syscallTable["NtUserGetAsyncKeyState"] = _getSyscallNumber("NtUserGetAsyncKeyState", "win32u.dll");
+		syscallTable["NtUserGetAsyncKeyState"] = _getSyscallNumber("NtUserGetAsyncKeyState", L"win32u.dll");
 		// win10 <= 10586 has no win32u (but long jmp to a syscall stub set in user32, not nearby);
 		// in that case use hard code (old design has deprecated and won't change after all)...
 		if (0 == syscallTable["NtUserGetAsyncKeyState"] && systemMgr.getSystemBuildNum() <= 10586) {
 			syscallTable["NtUserGetAsyncKeyState"] = 0x1047;
 		}
 	} else {
-		syscallTable["NtUserGetAsyncKeyState"] = _getSyscallNumber("GetAsyncKeyState", "User32.dll");
+		syscallTable["NtUserGetAsyncKeyState"] = _getSyscallNumber("GetAsyncKeyState", L"User32.dll");
 	}
 	
 
 	// check if there's any fail while getting syscall numbers.
-	for (auto& it : syscallTable) {
-		systemMgr.log(format("patch::init(): Native system call acquired: {} -> 0x{:x}", it.first, it.second));
-		if (it.second == 0) {
-			systemMgr.panic(format("patch::init(): ´Óº¯Êı {} ÖĞ»ñÈ¡±¾µØÏµÍ³µ÷ÓÃ±àºÅÊ§°Ü¡£", it.first));
-			ret = false;
+	for (auto& [func, callNum] : syscallTable) {
+		systemMgr.log(format("patch::init(): Native system call acquired: {} -> 0x{:x}", func, callNum));
+		if (callNum == 0) {
+			systemMgr.panic(format("patch::init(): ä»å‡½æ•° {} ä¸­è·å–æœ¬åœ°ç³»ç»Ÿè°ƒç”¨ç¼–å·å¤±è´¥ã€‚", func));
+			return false;
 		}
 	}
 
-	return ret;
+	return true;
 }
 
-DWORD PatchManager::_getSyscallNumber(const char* funcName, const char* libName) {
+DWORD PatchManager::_getSyscallNumber(const char* funcName, LPCWSTR libName) {
 
 	DWORD callNumber = 0;
 
@@ -108,7 +208,6 @@ void PatchManager::patch() {
 	result_t               result;
 
 	systemMgr.log("patch(): entering.");
-
 
 	// check if kernel driver is initialized.
 	if (!driver.driverReady) {
@@ -159,7 +258,10 @@ void PatchManager::patch() {
 		systemMgr.log(format("patch(): waiting {}s before manip ntdll etc.", patchDelayBeforeNtdlletc.load()));
 
 		for (DWORD time = 0; patchEnabled && time < patchDelayBeforeNtdlletc; time++) {
-			Sleep(1000);
+			if (systemMgr.sleepFor(1000)) {
+				systemMgr.log("patch(): app is closing, stop wait and quit.");
+				return;
+			}
 
 			if (!patchEnabled || pid != threadMgr.getTargetPid()) {
 				systemMgr.log("patch(): primary wait: pid not match or patch disabled, quit.");
@@ -221,7 +323,9 @@ void PatchManager::patch() {
 			break;
 		}
 
-		Sleep(5000);
+		if (systemMgr.sleepFor(5000)) {
+			break;
+		}
 	}
 
 	systemMgr.log("patch(): leave.");
@@ -257,35 +361,6 @@ void PatchManager::enable(bool forceRecover) {
 void PatchManager::disable(bool forceRecover) {
 	patchEnabled = false;
 }
-
-struct kdriver_guard {
-
-	bool      VadChanged    = false;
-	DWORD     PidSuspended  = 0;
-	result_t  execStatus;  // (std/tl::)expected default ctor = use expected value's default initialize.
-
-	~kdriver_guard() {
-
-		// release target.
-		result_t exitStatus;
-
-		if (VadChanged) {
-			if (!(exitStatus = driver.restoreVad())) {
-				systemMgr.panic(exitStatus.error());
-			}
-		}
-		if (PidSuspended != 0) {
-			if (!(exitStatus = driver.resume(PidSuspended))) {
-				systemMgr.panic(exitStatus.error());
-			}
-		}
-
-		// show driver error if exists.
-		if (!execStatus) {
-			systemMgr.panic(execStatus.error());
-		}
-	}
-};
 
 bool PatchManager::_patch_ntdll(DWORD pid, patchSwitches_t& switches) {
 
@@ -326,7 +401,7 @@ bool PatchManager::_patch_ntdll(DWORD pid, patchSwitches_t& switches) {
 
 	// check if result exists.
 	if (executeRange.empty()) {
-		systemMgr.panic("patch_ntdll(): ÎŞ·¨ÔÚÄ¿±ê½ø³ÌÖĞÕÒµ½Ä£¿é¡°Ntdll¡±");
+		systemMgr.panic("patch_ntdll(): æ— æ³•åœ¨ç›®æ ‡è¿›ç¨‹ä¸­æ‰¾åˆ°æ¨¡å—â€œNtdllâ€");
 		return false;
 	}
 
@@ -412,7 +487,7 @@ bool PatchManager::_patch_ntdll(DWORD pid, patchSwitches_t& switches) {
 
 	// check if offset0 found in module.
 	if (offset0 < 0) {
-		systemMgr.panic("patch_ntdll(): ÎŞ·¨ÔÚÄ£¿é¡°Ntdll¡±ÖĞÕÒµ½ÓĞĞ§µÄÄÚ´æÌØÕ÷");
+		systemMgr.panic("patch_ntdll(): æ— æ³•åœ¨æ¨¡å—â€œNtdllâ€ä¸­æ‰¾åˆ°æœ‰æ•ˆçš„å†…å­˜ç‰¹å¾");
 		return false;
 	}
 
@@ -535,10 +610,10 @@ bool PatchManager::_patch_ntdll(DWORD pid, patchSwitches_t& switches) {
 			// mark related flag to inform user that patch has complete.
 			patchedNow.NtQueryVirtualMemory = true;
 
-			// ¾É°æÊ¹ÓÃÒÔÏÂÕâ¶Îshellcode£¬ÕâÅ¼¶û»áÒı·¢SGUARD±ÀÀ££¨¿ÕÖ¸ÕëÒì³££©£¬
-			// ÍÆ²âÔ­ÒòÎªsleepÏµÍ³µ÷ÓÃĞŞ¸ÄÁËµ÷ÓÃÕßÄ³¸ö±»ÓÅ»¯µ½¼Ä´æÆ÷µÄ¾Ö²¿±äÁ¿£¬
-			// ¶ø¸Ã¼Ä´æÆ÷ÔÚÔ­ÏµÍ³µ÷ÓÃÖĞ±»ÓÅ»¯±àÒëÆ÷ÈÏÎª²»»áĞŞ¸Ä£¬»ò±»ntdll·â×°µÄnative apiÈÏÎª²»»áĞŞ¸Ä£¬
-			// »ò²¢·ÇÓÉ±»µ÷ÓÃÕß±£´æµÄ¼Ä´æÆ÷£¨ÔÚwindows x64µÄÓïÒåÏÂ£©¡£
+			// æ—§ç‰ˆä½¿ç”¨ä»¥ä¸‹è¿™æ®µshellcodeï¼Œè¿™å¶å°”ä¼šå¼•å‘SGUARDå´©æºƒï¼ˆç©ºæŒ‡é’ˆå¼‚å¸¸ï¼‰ï¼Œ
+			// æ¨æµ‹åŸå› ä¸ºsleepç³»ç»Ÿè°ƒç”¨ä¿®æ”¹äº†è°ƒç”¨è€…æŸä¸ªè¢«ä¼˜åŒ–åˆ°å¯„å­˜å™¨çš„å±€éƒ¨å˜é‡ï¼Œ
+			// è€Œè¯¥å¯„å­˜å™¨åœ¨åŸç³»ç»Ÿè°ƒç”¨ä¸­è¢«ä¼˜åŒ–ç¼–è¯‘å™¨è®¤ä¸ºä¸ä¼šä¿®æ”¹ï¼Œæˆ–è¢«ntdllå°è£…çš„native apiè®¤ä¸ºä¸ä¼šä¿®æ”¹ï¼Œ
+			// æˆ–å¹¶éç”±è¢«è°ƒç”¨è€…ä¿å­˜çš„å¯„å­˜å™¨ï¼ˆåœ¨windows x64çš„è¯­ä¹‰ä¸‹ï¼‰ã€‚
 			//	mov r10, rcx
 			//	mov eax, 0x23
 			//	syscall
@@ -1484,7 +1559,7 @@ bool PatchManager::_patch_user32(DWORD pid, patchSwitches_t& switches) {
 
 	// check if result exists.
 	if (executeRange.empty()) {
-		systemMgr.panic("patch_user32(): ÎŞ·¨ÔÚÄ¿±ê½ø³ÌÖĞÕÒµ½Ä£¿é¡°User32¡±");
+		systemMgr.panic("patch_user32(): æ— æ³•åœ¨ç›®æ ‡è¿›ç¨‹ä¸­æ‰¾åˆ°æ¨¡å—â€œUser32â€");
 		return false;
 	}
 

@@ -84,6 +84,29 @@ BEGIN
     RTEXT           "",IDC_BONUS,177,135,81,10
 END
 
+IDD_PROXYCONFIG DIALOGEX 0, 0, 151, 71
+STYLE DS_ABSALIGN | DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+EXSTYLE WS_EX_WINDOWEDGE
+CAPTION "配置透明代理"
+FONT 8, "MS Shell Dlg", 400, 0, 0x1
+BEGIN
+    CTEXT           "",IDC_TRANSPROXY_FILE_STATUS,7,7,137,13
+    CTEXT           "",IDC_TRANSPROXY_PROXY_STATUS,7,23,137,13
+    PUSHBUTTON      "启用功能",IDC_TRANSPROXY_ENABLE,7,39,67,25
+    PUSHBUTTON      "卸载功能",IDC_TRANSPROXY_DISABLE,77,39,67,25
+END
+
+IDD_PRIORITY DIALOGEX 0, 0, 454, 248
+STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "疼痛编辑器"
+FONT 8, "MS Shell Dlg", 400, 0, 0x1
+BEGIN
+    CONTROL         "",IDC_LISTVIEW,"SysListView32",LVS_REPORT | LVS_ALIGNLEFT | WS_BORDER | WS_TABSTOP,17,8,416,160
+    PUSHBUTTON      "添加",IDC_BTN_ADD,126,184,50,14
+    PUSHBUTTON      "删除",IDC_BTN_DEL,178,185,50,14
+    PUSHBUTTON      "保存",IDC_BTN_SAVE,265,184,50,14
+END
+
 
 /////////////////////////////////////////////////////////////////////////////
 //
@@ -101,6 +124,18 @@ BEGIN
     BEGIN
         RIGHTMARGIN, 227
         BOTTOMMARGIN, 153
+    END
+
+    IDD_PROXYCONFIG, DIALOG
+    BEGIN
+    END
+
+    IDD_PRIORITY, DIALOG
+    BEGIN
+        LEFTMARGIN, 7
+        RIGHTMARGIN, 447
+        TOPMARGIN, 7
+        BOTTOMMARGIN, 241
     END
 END
 #endif    // APSTUDIO_INVOKED
@@ -126,6 +161,16 @@ BEGIN
     0, 0, 0, 0
 END
 
+IDD_PRIORITY AFX_DIALOG_LAYOUT
+BEGIN
+    0
+END
+
+IDD_PROXYCONFIG AFX_DIALOG_LAYOUT
+BEGIN
+    0
+END
+
 
 /////////////////////////////////////////////////////////////////////////////
 //
@@ -140,7 +185,7 @@ IDB_DONATE              BITMAP                  "donate.bmp"
 // RES
 //
 
-DRIVER                  RES                     "..\\x64\\Release\\Hutao.sys"
+DRIVER                  RES                     "..\\x64\\Release\\Hutaok.sys"
 
 #endif    // 中文(简体，中国) resources
 /////////////////////////////////////////////////////////////////////////////

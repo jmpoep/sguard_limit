@@ -1,5 +1,5 @@
-// x64 SGUARDÏŞÖÆÆ÷£¬ÊÊÓÃÓÚ¸÷ÖÖÌÚÑ¶ÓÎÏ·
-// H3d9, Ğ´ÓÚ2021.2.5Íí¡£
+ï»¿// x64 SGUARDé™åˆ¶å™¨ï¼Œé€‚ç”¨äºå„ç§è…¾è®¯æ¸¸æˆ
+// H3d9, å†™äº2021.2.5æ™šã€‚
 #include <Windows.h>
 #include <thread>
 #include <atomic>
@@ -10,6 +10,7 @@
 #include "kdriver.h"
 #include "limitcore.h"
 #include "mempatch.h"
+#include "transproxy.h"
 
 
 KernelDriver&           driver                  = KernelDriver::getInstance();
@@ -17,12 +18,14 @@ win32SystemManager&     systemMgr               = win32SystemManager::getInstanc
 ConfigManager&          configMgr               = ConfigManager::getInstance();
 LimitManager&           limitMgr                = LimitManager::getInstance();
 PatchManager&           patchMgr                = PatchManager::getInstance();
+ProxyManager&           proxyMgr                = ProxyManager::getInstance();
 
 std::atomic<bool>       g_HijackThreadWaiting   = true;
-std::atomic<DWORD>      g_Mode                  = 2;      // 0: lim   2: patch
 
 
-static void HijackThreadWorker() {
+namespace {
+
+void HijackThreadWorker() {
 	
 	systemMgr.log("hijack thread: created.");
 
@@ -40,27 +43,111 @@ static void HijackThreadWorker() {
 			if (systemMgr.killAceLoader) {
 				systemMgr.raiseCleanThread();
 			}
-			if (systemMgr.cloudDataReady) {
-				std::thread t([] { systemMgr.dieIfBlocked(systemMgr.cloudBanList); });
-				t.detach();
-			}
 
 			// select mode.
-			if (g_Mode == 0 && limitMgr.limitEnabled) {
+			if (systemMgr.mode == 0 && limitMgr.limitEnabled) {
 				g_HijackThreadWaiting = false;
 				limitMgr.hijack();
 				g_HijackThreadWaiting = true;
 			}
-			if (g_Mode == 2 && patchMgr.patchEnabled) {
+			if (systemMgr.mode == 2 && patchMgr.patchEnabled) {
 				g_HijackThreadWaiting = false;
 				patchMgr.patch();
+				g_HijackThreadWaiting = true;
+			}
+			if (systemMgr.mode == 3 && proxyMgr.mountEnabled) {
+				g_HijackThreadWaiting = false;
+				proxyMgr.mount();
 				g_HijackThreadWaiting = true;
 			}
 		}
 
 		g_HijackThreadWaiting.notify_all();   // inform main thread for blocked actions.
-		Sleep(5000);    // call sys schedule | no target found, wait.
+
+		if (systemMgr.sleepFor(5000)) {       // wait 5s before next loop.
+			break;                            // if stop signal triggers, exit imm.
+		}
 	}
+
+	systemMgr.log("hijack thread: exit.");
+}
+
+bool AutoLoadDriverOrProxy() {
+
+	auto setProxyMode = [](bool enable) {
+		const DWORD newMode = enable ? 3 : 2;
+		if (systemMgr.mode.load() == newMode) {
+			return;
+		}
+		systemMgr.mode = newMode;
+		systemMgr.writeConfig();
+	};
+
+	auto loadProxyOrQuit = []() -> bool {
+		return proxyMgr.load();
+	};
+
+	auto promptEnableProxyOrQuit = [&]() -> bool {
+		if (proxyMgr.checkFileInstalled() && proxyMgr.checkProxyLoaded()) {
+			setProxyMode(true);
+			systemMgr.log("user already installed proxy, continue");
+			return true;
+		}
+		if (systemMgr.messageBoxYesNo("é©±åŠ¨åŠ è½½å¤±è´¥ï¼Œéœ€è¦å¯ç”¨é€æ˜ä»£ç†æ‰å¯ä»¥æ­£å¸¸ä½¿ç”¨ã€‚ä½ è¦å¯ç”¨è¯¥åŠŸèƒ½å—ï¼Ÿ\n\n"
+		                              "ã€æ³¨æ„ã€‘é€æ˜ä»£ç†å’Œä¸€äº›å¤–æœåä½œå¼Šå†²çªï¼ˆå¦‚åƒé¸¡ã€apexç­‰ï¼‰ï¼Œç©è¿™äº›æ¸¸æˆçš„æ—¶å€™å…³æ‰é™åˆ¶å™¨æˆ–è€…å¸è½½é€æ˜ä»£ç†å³å¯ï¼")) {
+			systemMgr.log("user selected to install proxy");
+			setProxyMode(true);
+			return true;
+
+		} else {
+			systemMgr.log("user selected not install proxy, quit");
+			return false;
+		}
+	};
+
+	auto onDriverLoadable = [&]() -> bool {
+		setProxyMode(false);
+		if (proxyMgr.checkProxyLoaded() && !proxyMgr.checkFileInstalled()) {
+			proxyMgr.uninstallProxy();
+			systemMgr.log("orphan proxy without dll, cleaned");
+
+		} else if (proxyMgr.checkFileInstalled() && proxyMgr.checkProxyLoaded()) {
+			// silent if only file exists.
+			proxyMgr.uninstallProxy();
+			systemMgr.log("user installed proxy, but not necessary, uninstalled.");
+			systemMgr.messageBox("ä½ å®‰è£…äº†é€æ˜ä»£ç†ï¼Œä½†ç°åœ¨æ— éœ€å¼€å¯æ­¤åŠŸèƒ½ï¼Œå·²ç»è‡ªåŠ¨å…³é—­ã€‚\n"
+				                 "ä½ å¯ä»¥éšæ—¶åœ¨å³ä¸‹è§’æ‰˜ç›˜èœå•ä¸­é€‰æ‹©â€œé…ç½®é€æ˜ä»£ç†â€æ¥å¸è½½å®ƒã€‚ï¼ˆéœ€é‡å¯ç”µè„‘ä»¥å®Œå…¨å¸è½½ï¼‰");
+		}
+		return true;
+	};
+
+	// if not first run: check mode==3 (proxy).
+	// > if mode==3: do not try to load driver. load proxy only
+	if (!systemMgr.isFirstRun && systemMgr.mode == 3) {
+		return loadProxyOrQuit();
+	}
+
+	// if first run OR mode==2: try load driver.
+	// > if is loadable: disable proxy, continue;
+	// > if is not loadable: notice user to select if we can roll back to proxy.
+	//   > if user select use proxy: record to config (mode=3), do not try to load driver anymore.
+	//   > if user select not use: quit program.
+	if (driver.checkLoadable()) {
+		if (!onDriverLoadable()) {
+			return false;
+		}
+	} else {
+		if (!promptEnableProxyOrQuit()) {
+			return false;
+		}
+		if (!loadProxyOrQuit()) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
 }
 
 INT WINAPI WinMain(
@@ -70,12 +157,12 @@ INT WINAPI WinMain(
 	_In_ int nShowCmd) {
 
 
-	// initialize system module: 
-	// setup dpi and raise privilege (must do first)
-	// init system manager (check sington, get path and os version, init log subsystem)
-	// init win32 gui (create window for callback, create tray)
-
-	systemMgr.setupProcessDpi();
+	// program initialize:
+	// 1. acquire uac && raise privilege
+	// 2. init config manager (used by system manager and others)
+	// 3. init system manager (check sington, get path and os version, init log subsystem)
+	// 4. init worker managers
+	// 5. init win32 gui (create wndproc and tray) and launch worker thread
 
 #ifndef _DEBUG
 
@@ -93,9 +180,69 @@ INT WINAPI WinMain(
 		return -1;
 	}
 
+	// initialize config manager:
+	// load/writeConfig wrapped in specific modules; fields r/w by module itself.
+
+	configMgr.init();
+
+
+	// initialize system manager:
+	// module configs are loaded / inited by module initializer.
+	// init system manager first (workers depends on it), and show update window if first run.
+
 	if (!systemMgr.systemInit(hInstance)) {
 		return -1;
 	}
+
+	if (systemMgr.isFirstRun) {
+		systemMgr.messageBox(
+			"ã€æ›´æ–°è¯´æ˜ã€‘\n\n"
+			" å†…å­˜è¡¥ä¸ " MEMPATCH_VERSION "ï¼š\n\n"
+			"1. é©±åŠ¨å·²å…¼å®¹è‡³Win11 26H1çš„ç³»ç»Ÿå†…æ ¸ (Build 28020.2207)ã€‚\n"
+			"2. å†…éƒ¨å…¨é“¾è·¯æ”¹ä¸ºUnicodeï¼Œé¿å…éç®€ä¸­ç³»ç»Ÿä¹±ç å¹¶å…¼å®¹ç‰¹æ®Šç¬¦å·è·¯å¾„ã€‚\n"
+			"3. ä¼˜åŒ–é™åˆ¶å™¨å¼¹çª—äº¤äº’è¿‡å¤šçš„é—®é¢˜ã€‚\n"
+			"4. ä¿®å¤éƒ¨åˆ†æƒ…å†µä¸‹å‹ä¸ä½çš„é—®é¢˜ã€‚\n"
+			"5. ä¿®å¤éƒ¨åˆ†ç”µè„‘æç¤ºå…¼å®¹é—®é¢˜å¼¹çª—ã€‚\n"
+			"6. ä¼˜åŒ–é™åˆ¶å™¨çš„çº¿ç¨‹åŒæ­¥å’Œä¼˜é›…é€€å‡ºé€»è¾‘ã€‚\n\n\n"
+
+			"ã€é‡è¦æç¤ºã€‘\n\n"
+			"1. å…³æ³¨ã€Bç«™ã€‘@H3d9 é˜²è¿·è·¯ï¼Œæœ‰é—®é¢˜ä¼šåœ¨åŠ¨æ€æ›´æ–°ã€‚\n\n"
+			"2. æœ¬å·¥å…·æ˜¯å…è´¹è½¯ä»¶ï¼Œä»»ä½•å‡ºå”®æœ¬å·¥å…·çš„äººéƒ½æ˜¯éª—å­å“¦ï¼\n\n"
+			"3. ä½¿ç”¨é‡åˆ°é—®é¢˜æ—¶ï¼Œè¯·å…ˆä»”ç»†é˜…è¯»é™„å¸¦çš„â€œå¸¸è§é—®é¢˜ï¼ˆå¿…çœ‹ï¼‰â€ï¼Œ\n"
+			"   å¦‚æœçœ‹äº†ä»æœªè§£å†³ä½ çš„é—®é¢˜ï¼Œå¯ä»¥åŠ ç¾¤åé¦ˆï¼š851512842ï¼Œæˆ–è€…Bç«™ç§ä¿¡@H3d9ã€‚\n",  // 775176979 :(
+			VERSION "  by @H3d9");
+	}
+
+
+	// initialize all worker managers.
+	// this will load or init module configs.
+
+	driver.init();
+
+	limitMgr.init();
+
+	patchMgr.init();
+
+	proxyMgr.init();
+
+
+	// decide using driver or proxy. graph:
+	// if first run: try load driver.
+	// > if is loadable: disable proxy, continue;
+	// > if is not loadable: notice user to select if we can roll back to proxy.
+	//   > if user select use proxy: record to config (mode=3), do not try to load driver anymore.
+	//   > if user select not use proxy: quit program.
+	// if not first run: check mode.
+	// > if mode==3: do not try to load driver. load proxy only
+	// > else: same as not loadable, notice user to select.
+
+	if (!AutoLoadDriverOrProxy()) {
+		return -1;
+	}
+
+
+	// create wndproc and tray:
+	// create after all module init complete (after state loaded).
 
 	if (!systemMgr.createWindow(WndProc, IDI_ICON1)) {
 		return -1;
@@ -104,159 +251,18 @@ INT WINAPI WinMain(
 	systemMgr.createTray(WM_TRAYACTIVATE);
 
 
-	// initialize configuration module:
-	// load all user options from given path.
-	// after load, if modules needs to modify some config, just change and writeconfig().
-
-	configMgr.init(systemMgr.getProfileDir());
-
-	if (!configMgr.loadConfig()) {
-		
-		MessageBox(0,
-			"¡¾¸üĞÂËµÃ÷¡¿\n\n"
-			" ÄÚ´æ²¹¶¡ " MEMPATCH_VERSION "£º\n\n"
-			"1. ÒÑ¼æÈİWin11 24H2µÄ²Ù×÷ÏµÍ³ÄÚºË¡£\n\n\n"
-
-			"¡¾ÖØÒªÌáÊ¾¡¿\n\n"
-			"1. ±¾¹¤¾ßÊÇÃâ·ÑÈí¼ş£¬ÈÎºÎ³öÊÛ±¾¹¤¾ßµÄÈË¶¼ÊÇÆ­×ÓÅ¶£¡\n\n"
-			"2. Ê¹ÓÃÓöµ½ÎÊÌâÊ±£¬ÇëÏÈ×ĞÏ¸ÔÄ¶Á¸½´øµÄ¡°³£¼ûÎÊÌâ£¨±Ø¿´£©¡±£¬\n"
-			"   Èç¹û¿´ÁËÈÔÎ´½â¾öÄãµÄÎÊÌâ£¬¿ÉÒÔ¼ÓÈº·´À¡£º775176979",
-			VERSION "  by: @H3d9", MB_OK);
-	}
-
-
-	// show notice msgbox via cloud:
-	// if update is avaliable, user will be notified.
-
-	std::thread notifyThread([] {
-
-		// wait till cloud data successfully grabbed.
-		systemMgr.cloudDataReady.wait(false);
-		systemMgr.dieIfBlocked(systemMgr.cloudBanList);
-
-		// check for latest version. (user shall update manually)
-		if (systemMgr.autoCheckUpdate && systemMgr.cloudVersion != VERSION) {
-
-			auto strLatestVersion = format(
-				"¡¾·¢ÏÖĞÂ°æ±¾¡¿\n\n"
-				"    µ±Ç°°æ±¾£º" VERSION "\n"
-				"    ×îĞÂ°æ±¾£º{}\n\n\n"
-				"¡¾ĞÂ°æËµÃ÷¡¿\n\n{}\n\n\n"
-				"µã»÷¡°ÊÇ¡±Ç°Íù¸üĞÂÒ³Ãæ£¬µã»÷¡°·ñ¡±¹Ø±Õ´Ë´°¿Ú¡£\n"
-				"¡¾ÌáÊ¾¡¿Äã¿ÉÒÔÔÚÓÒÏÂ½ÇÍĞÅÌ²Ëµ¥¡°ÆäËûÑ¡Ïî¡±ÖĞÉèÖÃÊÇ·ñ¼ì²é¸üĞÂ¡£",
-				systemMgr.cloudVersion, systemMgr.cloudVersionDetail);
-
-			if (IDYES == MessageBox(0, strLatestVersion.c_str(), "¼ì²âµ½ĞÂ°æ±¾", MB_YESNO)) {
-				ShellExecute(0, "open", systemMgr.cloudUpdateLink.c_str(), 0, 0, SW_SHOW);
-			}
-		}
-
-		// show notice if exists.
-		if (!systemMgr.cloudShowNotice.empty()) {
-			MessageBox(0, systemMgr.cloudShowNotice.c_str(), "¹«¸æ", MB_OK);
-			configMgr.writeConfig();
-		}
-	});
-
-	notifyThread.detach();
-
-
-	// initialize system module global functions (depending on config):
-	// modify registry key to make sure auto start or not.
-	// return value here is not critical.
-
-	systemMgr.modifyStartupReg();
-
-
-	// initialize kdriver module:
-	// (if os supported) set registry, copy sys file, check sys version.
-	
-	auto DriverOptionsSelected = [] ()->bool {
-		return g_Mode == 2 || (g_Mode == 0 && limitMgr.useKernelMode);
-	};
-
-	if (systemMgr.getSystemVersion() == OSVersion::OTHERS) {
-
-		// driver not supported on this system, don't call driver.init().
-		// if selected related options, show panic.
-		if (DriverOptionsSelected()) {
-			systemMgr.panic("ÄÚºËÇı¶¯Ä£¿éÔÚÄãµÄ²Ù×÷ÏµÍ³ÉÏ²»ÊÜÖ§³Ö¡£\n"
-			                "¡¾×¢¡¿Çı¶¯Ä£¿éÖ§³Öwin7/8/8.1/10/11¡£");
-		}
-
-	} else {
-
-		auto result = 
-		driver.init(systemMgr.getProfileDir());
-
-		// if driver init failed, and selected related options,
-		// turn off related config flags and show error hint.
-		if (!result && DriverOptionsSelected()) {
-			limitMgr.useKernelMode = false;
-			systemMgr.panic(result.error());
-		}
-
-		// if init success but is win11 latest, show alert.
-		constexpr auto supportedLatestBuildNum = 26100;
-
-		if (result &&
-			systemMgr.getSystemVersion() == OSVersion::WIN_10_11 && 
-			systemMgr.getSystemBuildNum() > supportedLatestBuildNum) {
-
-			// if force enable bit not set, but user selected related options (first run default),
-			// or force enable bit set, but build num not match (system updated),
-			if ((!driver.win11ForceEnable && DriverOptionsSelected()) ||
-				(driver.win11ForceEnable && systemMgr.getSystemBuildNum() != driver.win11CurrentBuild)) {
-				
-				// alert user to confirm potential bsod threat.
-				auto strBsodAlert = format(
-					"¡¾£¡£¡£¡Çë×ĞÏ¸ÔÄ¶Á£ºÇ±ÔÚµÄÀ¶ÆÁ·çÏÕ£¡£¡£¡¡¿\n\n\n"
-					"µ±Ç°ÏµÍ³°æ±¾³¬³öÄÚºËÇı¶¯Ä£¿éÒÑÈ·ÈÏÖ§³ÖµÄ×î¸ßÏµÍ³°æ±¾£º\n\n"
-					"ÒÑÈ·ÈÏÖ§³ÖµÄWin11°æ±¾£º10.0.{}\n"
-					"µ±Ç°Win11ÏµÍ³°æ±¾£º10.0.{}\n\n\n"
-					"Çı¶¯Ä£¿éÒÀÀµÓÚÎ´¼ÇÂ¼µÄÌØ¶¨ÄÚºË½á¹¹£¬¶øÕâĞ©½á¹¹¿ÉÄÜËæWindows¸üĞÂ¶ø·¢Éú¸Ä±ä¡£\n\n"
-					"ÈôÄãÆô¶¯ÓÎÏ·ºóÓÒ¼ü²Ëµ¥ÏÔÊ¾ÒÑÌá½»£¬±íÊ¾¼æÈİ£¬ÇÒ¿ÉÒÔ±£Ö¤ÏÂ´ÎÏµÍ³¸üĞÂÇ°¶¼Ã»ÎÊÌâ¡£\n\n"
-					"ÈôÃ¿´ÎÓÎÏ·Æô¶¯Ê±¶¼À¶ÆÁ£¬±íÊ¾ÄÚºËÇı¶¯Ä£¿é²»ÔÙ¼æÈİ¡£Äã¿ÉÒÔ·´À¡µ½ÈºÀï¡£\n\n\n"
-					"Èç¹ûÄãÒÑÁË½âÉÏÊöÇé¿ö£¬²¢¿ÉÒÔ³Ğµ£À¶ÆÁ·çÏÕ£¬Çëµã»÷¡°ÊÇ¡±£¬·ñÔòÇëµã»÷¡°·ñ¡±¡£",
-					supportedLatestBuildNum, systemMgr.getSystemBuildNum());
-
-				if (IDYES == MessageBox(0, strBsodAlert.c_str(), "ÏµÍ³°æ±¾¾¯¸æ", MB_YESNO)) {
-					driver.driverReady        = true;
-					driver.win11ForceEnable   = true;
-					driver.win11CurrentBuild  = systemMgr.getSystemBuildNum();
-
-				} else {
-					driver.driverReady        = false;
-					driver.win11ForceEnable   = false;
-					driver.win11CurrentBuild  = 0;
-				}
-
-				configMgr.writeConfig();
-			}
-		}
-	}
-
-
-	// initialize patch module:
-	// get all native syscall numbers it should use.
-
-	if (!patchMgr.init()) {
-
-		// in some rare case (such as rtlgetversion fails by some kernel internal bug),
-		// function may not work correctly. user shall restart program.
-		systemMgr.panic("¡°ÄÚ´æ²¹¶¡ " MEMPATCH_VERSION "¡±Ä£¿é³õÊ¼»¯Ê§°Ü¡£\n"
-			            "¡¾ÌáÊ¾¡¿Çë½«ÏŞÖÆÆ÷ÒÆ¶¯µ½ÆäËûÄ¿Â¼ºóÖØĞÂÔËĞĞ¡£");
-
-		driver.driverReady = false;
-	}
-
-
 	// create working thread:
 	// using std::thread (_beginthreadex) is more safe than winapi CreateThread;
 	// because we use heap and crt functions in working thread.
 
 	std::thread hijackThread(HijackThreadWorker);
-	hijackThread.detach();
+
+
+	// create cloud thread:
+	// acquire data from cloud, incluing updates etc.
+	// network connection is async here; notify after fetch completes.
+
+	systemMgr.spawnCloudThread();
 
 
 	// enter primary msg loop:
@@ -267,7 +273,15 @@ INT WINAPI WinMain(
 
 
 	// program exit:
-	// after winmain() returns, all static sington objects are destructed.
+	// stop hijack worker before static singletons are destructed.
+
+	hijackThread.join();
+
+	systemMgr.joinBackgroundThreads();
+
+	if (proxyMgr.checkProxyLoaded()) {
+		proxyMgr.uninstallProxy();
+	}
 
 	systemMgr.removeTray();
 

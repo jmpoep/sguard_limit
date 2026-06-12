@@ -1,24 +1,35 @@
-// Ó¦ÓÃ²ã/ÄÚºËÌ¬µ÷¶ÈÆ÷£¨·ÖÊ±round-robin£©
-// H3d9ÓÚ21.2.5£¬Ò¹¡£
+ï»¿// åº”ç”¨å±‚/å†…æ ¸æ€è°ƒåº¦å™¨ï¼ˆåˆ†æ—¶round-robinï¼‰
+// H3d9äº21.2.5ï¼Œå¤œã€‚
 #include <Windows.h>
 #include "limitcore.h"
 
 // dependencies
 #include "kdriver.h"
+#include "config.h"
 #include "win32utility.h"
 
 extern KernelDriver&          driver;
+extern ConfigManager&         configMgr;
 extern win32SystemManager&    systemMgr;
 
 
 // Limit Manager
-LimitManager  LimitManager::limitManager;
 
-LimitManager::LimitManager() 
-	: limitEnabled(true), limitPercent(90), useKernelMode(true) {}
+void LimitManager::init() {
+	this->loadConfig();
+	if (systemMgr.isFirstRun) {
+		this->writeConfig();
+	}
+}
 
-LimitManager& LimitManager::getInstance() {
-	return limitManager;
+void LimitManager::loadConfig() {
+	limitPercent  = configMgr.readDword("Limit", "Percent", 90);
+	useKernelMode = configMgr.readBool("Limit", "useKernelMode", true);
+}
+
+void LimitManager::writeConfig() {
+	configMgr.writeDword("Limit", "Percent", limitPercent.load());
+	configMgr.writeBool("Limit", "useKernelMode", useKernelMode.load());
 }
 
 void LimitManager::hijack() {
@@ -161,6 +172,5 @@ void LimitManager::disable() {
 }
 
 void LimitManager::setPercent(DWORD percent) {
-	limitEnabled = true;
 	limitPercent = percent;
 }

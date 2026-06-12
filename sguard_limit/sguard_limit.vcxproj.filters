@@ -3,7 +3,6 @@
   <ItemGroup>
     <ClCompile Include="main.cpp" />
     <ClCompile Include="wndproc.cpp" />
-    <ClCompile Include="win32utility.cpp" />
     <ClCompile Include="limitcore.cpp">
       <Filter>limit</Filter>
     </ClCompile>
@@ -13,14 +12,20 @@
     <ClCompile Include="kdriver.cpp">
       <Filter>kdriver</Filter>
     </ClCompile>
+    <ClCompile Include="app_paths.cpp">
+      <Filter>util</Filter>
+    </ClCompile>
     <ClCompile Include="config.cpp">
       <Filter>config</Filter>
+    </ClCompile>
+    <ClCompile Include="win32utility.cpp" />
+    <ClCompile Include="transproxy.cpp">
+      <Filter>proxy</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="resource.h" />
     <ClInclude Include="wndproc.h" />
-    <ClInclude Include="win32utility.h" />
     <ClInclude Include="limitcore.h">
       <Filter>limit</Filter>
     </ClInclude>
@@ -30,16 +35,28 @@
     <ClInclude Include="kdriver.h">
       <Filter>kdriver</Filter>
     </ClInclude>
+    <ClInclude Include="app_paths.h">
+      <Filter>util</Filter>
+    </ClInclude>
     <ClInclude Include="config.h">
       <Filter>config</Filter>
+    </ClInclude>
+    <ClInclude Include="tiny_format.h">
+      <Filter>util</Filter>
+    </ClInclude>
+    <ClInclude Include="win32utility.h" />
+    <ClInclude Include="transproxy.h">
+      <Filter>proxy</Filter>
+    </ClInclude>
+    <ClInclude Include="sync.h">
+      <Filter>proxy</Filter>
+    </ClInclude>
+    <ClInclude Include="string_conv.h">
+      <Filter>util</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="sguard_limit.rc" />
-  </ItemGroup>
-  <ItemGroup>
-    <Image Include="logo.ico" />
-    <Image Include="donate.bmp" />
   </ItemGroup>
   <ItemGroup>
     <Filter Include="limit">
@@ -54,5 +71,21 @@
     <Filter Include="config">
       <UniqueIdentifier>{7d144aca-161b-44a8-8939-147c36048763}</UniqueIdentifier>
     </Filter>
+    <Filter Include="util">
+      <UniqueIdentifier>{ca4d46c2-fbad-4182-9687-9668c2e38a85}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="proxy">
+      <UniqueIdentifier>{8076fd93-47e9-41ee-974c-0c09c524bf53}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="logo.ico" />
+    <Image Include="donate.bmp" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\x64\Release\Hutaok.sys" />
+  </ItemGroup>
+  <ItemGroup>
+    <Manifest Include="app.manifest" />
   </ItemGroup>
 </Project>

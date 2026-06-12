@@ -1,56 +1,402 @@
-#include <Windows.h>
+ï»¿#include <Windows.h>
 #include <cstdio>
+#include <cstring>
 #include <functional>
-#include <fmt/core.h> // msvc std::format generates large file size
+#include <vector>
 #include "resource.h"
 #include "kdriver.h"
+#include "config.h"
+#include "win32utility.h"  // tiny::format
+#include "app_paths.h"
+#include "string_conv.h"
 
-#define DRIVER_NAME       "Hutao"
-#define DRIVER_VERSION    "24.10.26"
+#define DRIVER_NAME       "Hutaok"
+#define DRIVER_NAME_W     L"Hutaok"
+#define DRIVER_VERSION    "26.5.17"
 
-using fmt::format;
-using unexpected_error = tl::unexpected<error_t>;
+constexpr auto supportedLatestBuildNum = 28020;
+
+extern win32SystemManager&  systemMgr;
+extern ConfigManager&       configMgr;
+
+
+// kdriver internal impl
+
+namespace {
+
+struct service_guard {
+	SC_HANDLE hSCManager = NULL;
+	SC_HANDLE hService   = NULL;
+
+	~service_guard() {
+		if (hService) {
+			CloseServiceHandle(hService);
+		}
+		if (hSCManager) {
+			CloseServiceHandle(hSCManager);
+		}
+	}
+};
+
+struct VMIO_REQUEST {
+	HANDLE   pid;
+
+	PVOID    address           = NULL;
+	CHAR     data   [0x1000]   = {};
+
+	ULONG    errorCode         = 0;
+	CHAR     errorFunc [256]   = {};
+
+	VMIO_REQUEST(DWORD pid) : pid(reinterpret_cast<HANDLE>(static_cast<LONG64>(pid))) {}
+};
+
+constexpr DWORD   VMIO_VERSION   = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x0700, METHOD_BUFFERED, FILE_SPECIAL_ACCESS);
+constexpr DWORD   VMIO_READ      = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x0701, METHOD_BUFFERED, FILE_SPECIAL_ACCESS);
+constexpr DWORD   VMIO_WRITE     = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x0702, METHOD_BUFFERED, FILE_SPECIAL_ACCESS);
+constexpr DWORD   VMIO_ALLOC     = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x0703, METHOD_BUFFERED, FILE_SPECIAL_ACCESS);
+constexpr DWORD   IO_SUSPEND     = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x0704, METHOD_BUFFERED, FILE_SPECIAL_ACCESS);
+constexpr DWORD   IO_RESUME      = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x0705, METHOD_BUFFERED, FILE_SPECIAL_ACCESS);
+constexpr DWORD   VM_VADSEARCH   = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x0706, METHOD_BUFFERED, FILE_SPECIAL_ACCESS);
+constexpr DWORD   VM_VADRESTORE  = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x0707, METHOD_BUFFERED, FILE_SPECIAL_ACCESS);
+constexpr DWORD   PATCH_ACEBASE  = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x0708, METHOD_BUFFERED, FILE_SPECIAL_ACCESS);
+
+std::string ReadErrorFunc(const VMIO_REQUEST& request) {
+	return std::string(request.errorFunc, strnlen_s(request.errorFunc, sizeof(request.errorFunc)));
+}
+
+} // namespace
 
 
 // kernel mode memory operation
-KernelDriver  KernelDriver::kernelDriver;
-
-KernelDriver::KernelDriver()
-	: driverReady(false), win11ForceEnable(false), win11CurrentBuild(0),
-	  sysfile_LoadPath{}, sysfile_CurPath{}, hDriver(INVALID_HANDLE_VALUE), loadCount{0}, loadLock{} {}
-      // ¡ì12.6.2.5: Initialization shall proceed in the following order:
-      // ... nonstatic data members shall be initialized in the order they were declared in the class definition 
-      // (again regardless of the order of the mem-initializers). ...
 
 KernelDriver::~KernelDriver() {
 	unload();
 }
 
-KernelDriver& KernelDriver::getInstance() {
-	return kernelDriver;
+void KernelDriver::init() {
+
+	// load config, init path and cert.
+	// NOT include _runSystemCheck(), use lazy check:
+	// if user select 'no' and use other mode at beginning, init will always send warning at app start.
+	// NOT include checkLoadable():
+	// if once driver load fail and user use other mode, init will still try to load driver at app start.
+
+	this->loadConfig();
+	if (systemMgr.isFirstRun) {
+		this->writeConfig();
+	}
+
+	// initialize load path.
+	sysImagePath = AppPaths::profileDir() + "\\" DRIVER_NAME ".sys";
+
+	// remove cert key for it's no longer needed.
+	_removeCertKey();
+}
+
+bool KernelDriver::checkLoadable() {
+
+	// check driver loadable, and set driverReady flag.
+	result_t result;
+
+	// before load, check system compatible, and show warning msgbox
+	if (!(result = _runSystemCheck())) {
+		if (const auto& [msg, ec] = result.error(); !msg.empty()) {
+			systemMgr.panic(msg);
+		}
+		return false;
+	}
+
+	// copy image (load > _startService), then try load driver.
+	if (!(result = load())) {
+		systemMgr.panic(result.error());
+		return false;
+	}
+
+	if (!(result = _checkSysVersionMatch())) {
+		unload();
+		systemMgr.panic(result.error());
+		return false;
+	}
+
+	unload();
+
+	// driver avaliable = ret val / driverReady (flag used in menu)
+	// ret maybe not used, use driverReady to check load status.
+	return driverReady = true;
 }
 
 
-result_t KernelDriver::init(std::string loadPath) {
+result_t KernelDriver::load() {
 
 
-	// initialize load path and current path.
-	sysfile_LoadPath = loadPath + "\\" DRIVER_NAME ".sys";
+	std::lock_guard<std::mutex> cxx_guard(loadLock);
 
-	char curPath[MAX_PATH];
-	GetModuleFileName(NULL, curPath, MAX_PATH);
 
-	if (auto p = strrchr(curPath, '\\')) {
-		*p = '\0';
-		strcat(curPath, "\\" DRIVER_NAME ".sys");
-		sysfile_CurPath = curPath;
+	// when load success, cnt -> 1, service start and program acquires handle.
+	// and as we call unload, cnt -> 0, program release handle and service will stop.
+	result_t result;
 
-	} else {
-		return unexpected_error(__FUNCTION__ "(): »ñÈ¡µ±Ç°Ä¿Â¼Ê§°Ü¡£", GetLastError());
+	if (loadCount == 0) {
+
+		// load device driver. use existing service if exists, or create a new one.
+		result = _startService();
+		if (!result) {
+			return result;
+		}
+
+		hDriver = CreateFile(L"\\\\.\\" DRIVER_NAME_W, GENERIC_ALL, FILE_SHARE_READ | FILE_SHARE_WRITE, 0, OPEN_EXISTING, 0, 0);
+
+		if (hDriver == INVALID_HANDLE_VALUE) {
+			return unexpected_error(__FUNCTION__ "(): CreateFileå¤±è´¥ã€‚", GetLastError());
+		}
+	}
+
+	// only successful loading can increase atomic count.
+	++loadCount;
+
+	return true;
+}
+
+void KernelDriver::unload() {
+
+	std::lock_guard<std::mutex> cxx_guard(loadLock);
+
+
+	// atomic count will decrease as soon as unload is called.
+
+	if (--loadCount == 0) {
+
+		CloseHandle(hDriver);
+		hDriver = INVALID_HANDLE_VALUE;
+
+		// if call unload as loadCount == 0 (no one is using), do endService().
+		_endService();
+	}
+}
+
+
+result_t KernelDriver::readVM(DWORD pid, PVOID out, PVOID targetAddress) {
+
+	// assert: "out" is a 16K buffer.
+	VMIO_REQUEST  request(pid);
+	DWORD         Bytes;
+
+
+	for (auto page = 0; page < 4; page++) {
+
+		request.address = (PVOID)((ULONG64)targetAddress + page * 0x1000);
+
+		if (!DeviceIoControl(hDriver, VMIO_READ, &request, sizeof(request), &request, sizeof(request), &Bytes, NULL)) {
+			return unexpected_error(__FUNCTION__ "(): DeviceIoControlå¤±è´¥ã€‚", GetLastError());
+		}
+		if (request.errorCode != 0) {
+			return unexpected_error(format(__FUNCTION__ "(): {}", ReadErrorFunc(request)), request.errorCode);
+		}
+
+		memcpy((PVOID)((ULONG64)out + page * 0x1000), request.data, 0x1000);
+	}
+
+	return true;
+}
+
+result_t KernelDriver::writeVM(DWORD pid, PVOID in, PVOID targetAddress) {
+
+	// assert: "in" is a 16K buffer.
+	VMIO_REQUEST  request(pid);
+	DWORD         Bytes;
+
+
+	for (auto page = 0; page < 4; page++) {
+
+		request.address = (PVOID)((ULONG64)targetAddress + page * 0x1000);
+		memcpy(request.data, (PVOID)((ULONG64)in + page * 0x1000), 0x1000);
+
+		if (!DeviceIoControl(hDriver, VMIO_WRITE, &request, sizeof(request), &request, sizeof(request), &Bytes, NULL)) {
+			return unexpected_error(__FUNCTION__ "(): DeviceIoControlå¤±è´¥ã€‚", GetLastError());
+		}
+		if (request.errorCode != 0) {
+			return unexpected_error(format(__FUNCTION__ "(): {}", ReadErrorFunc(request)), request.errorCode);
+		}
+	}
+
+	return true;
+}
+
+result_t KernelDriver::allocVM(DWORD pid, PVOID* pAllocatedAddress) {
+
+	VMIO_REQUEST  request(pid);
+	DWORD         Bytes;
+
+
+	if (!DeviceIoControl(hDriver, VMIO_ALLOC, &request, sizeof(request), &request, sizeof(request), &Bytes, NULL)) {
+		return unexpected_error(__FUNCTION__ "(): DeviceIoControlå¤±è´¥ã€‚", GetLastError());
+	}
+	if (request.errorCode != 0) {
+		return unexpected_error(format(__FUNCTION__ "(): {}", ReadErrorFunc(request)), request.errorCode);
+	}
+
+	*pAllocatedAddress = request.address;
+
+	return true;
+}
+
+result_t KernelDriver::suspend(DWORD pid) {
+
+	VMIO_REQUEST  request(pid);
+	DWORD         Bytes;
+
+
+	if (!DeviceIoControl(hDriver, IO_SUSPEND, &request, sizeof(request), &request, sizeof(request), &Bytes, NULL)) {
+		return unexpected_error(__FUNCTION__ "(): DeviceIoControlå¤±è´¥ã€‚", GetLastError());
+	}
+	if (request.errorCode != 0) {
+		return unexpected_error(format(__FUNCTION__ "(): {}", ReadErrorFunc(request)), request.errorCode);
+	}
+
+	return true;
+}
+
+result_t KernelDriver::resume(DWORD pid) {
+
+	VMIO_REQUEST  request(pid);
+	DWORD         Bytes;
+
+
+	if (!DeviceIoControl(hDriver, IO_RESUME, &request, sizeof(request), &request, sizeof(request), &Bytes, NULL)) {
+		return unexpected_error(__FUNCTION__ "(): DeviceIoControlå¤±è´¥ã€‚", GetLastError());
+	}
+	if (request.errorCode != 0) {
+		return unexpected_error(format(__FUNCTION__ "(): {}", ReadErrorFunc(request)), request.errorCode);
+	}
+
+	return true;
+}
+
+result_t KernelDriver::searchVad(DWORD pid, std::vector<ULONG64>& out, const wchar_t* moduleName) {
+
+	VMIO_REQUEST  request(pid);
+	DWORD         Bytes;
+
+
+	wcscpy((wchar_t*)request.data, moduleName);  // [io param] moduleName => (wchar_t*)request.data
+
+	if (!DeviceIoControl(hDriver, VM_VADSEARCH, &request, sizeof(request), &request, sizeof(request), &Bytes, NULL)) {
+		return unexpected_error(__FUNCTION__ "(): DeviceIoControlå¤±è´¥ã€‚", GetLastError());
+	}
+	if (request.errorCode != 0) {
+		return unexpected_error(format(__FUNCTION__ "(): {}", ReadErrorFunc(request)), request.errorCode);
+	}
+
+	out.clear();
+	auto addressArray = (ULONG64*)request.data;
+
+	while ( *addressArray ) {
+
+		out.push_back(*addressArray);
+		out.push_back(*(addressArray + 1));
+
+		addressArray += 2;
+	}
+
+	return true;
+}
+
+result_t KernelDriver::restoreVad() {
+
+	VMIO_REQUEST  request(0);
+	DWORD         Bytes;
+
+
+	if (!DeviceIoControl(hDriver, VM_VADRESTORE, &request, sizeof(request), &request, sizeof(request), &Bytes, NULL)) {
+		return unexpected_error(__FUNCTION__ "(): DeviceIoControlå¤±è´¥ã€‚", GetLastError());
+	}
+	if (request.errorCode != 0) {
+		return unexpected_error(format(__FUNCTION__ "(): {}", ReadErrorFunc(request)), request.errorCode);
+	}
+	
+	return true;
+}
+
+result_t KernelDriver::patchAceBase() {
+
+	VMIO_REQUEST  request(0);
+	DWORD         Bytes;
+
+
+	*(int*)request.data = ~1;
+
+	if (!DeviceIoControl(hDriver, PATCH_ACEBASE, &request, sizeof(request), &request, sizeof(request), &Bytes, NULL)) {
+		return unexpected_error(__FUNCTION__ "(): DeviceIoControlå¤±è´¥ã€‚", GetLastError());
+	}
+	if (request.errorCode != 0) {
+		return unexpected_error(format(__FUNCTION__ "(): data_hijack: {}", ReadErrorFunc(request)), request.errorCode);
+	}
+
+	return true;
+}
+
+
+void KernelDriver::loadConfig() {
+	win11ForceEnable = configMgr.readBool("kdriver", "win11ForceEnable", false);
+	win11CurrentBuild = configMgr.readDword("kdriver", "win11CurrentBuild", 0);
+}
+
+void KernelDriver::writeConfig() {
+	configMgr.writeBool("kdriver", "win11ForceEnable", win11ForceEnable);
+	configMgr.writeDword("kdriver", "win11CurrentBuild", win11CurrentBuild);
+}
+
+
+result_t KernelDriver::_runSystemCheck()
+{
+	auto user_cancelled = [] { return unexpected_error("", 0); };
+
+	if (systemMgr.getSystemVersion() == OSVersion::OTHERS) {
+		return unexpected_error("å†…æ ¸é©±åŠ¨æ¨¡å—åœ¨ä½ çš„æ“ä½œç³»ç»Ÿä¸Šä¸å—æ”¯æŒã€‚\n"
+			                    "ã€æ³¨ã€‘é©±åŠ¨æ¨¡å—æ”¯æŒwin7/8/8.1/10/11ã€‚", 0);
+	}
+
+	// if init success but is win11 latest, show alert.
+	if (systemMgr.getSystemVersion() == OSVersion::WIN_10_11 &&
+		systemMgr.getSystemBuildNum() > supportedLatestBuildNum) {
+
+		// if force enable flag not set, but user selected related options (first run default),
+		// or force enable bit set, but build num not match (system updated),
+		if (!win11ForceEnable ||
+			(win11ForceEnable && systemMgr.getSystemBuildNum() != win11CurrentBuild)) {
+
+			// alert user to confirm potential bsod threat.
+			auto strBsodAlert = format(
+				"ã€ï¼ï¼ï¼è¯·ä»”ç»†é˜…è¯»ï¼šæ½œåœ¨çš„è“å±é£é™©ï¼ï¼ï¼ã€‘\n\n\n"
+				"å½“å‰ç³»ç»Ÿç‰ˆæœ¬è¶…å‡ºå†…æ ¸é©±åŠ¨æ¨¡å—å·²ç¡®è®¤æ”¯æŒçš„æœ€é«˜ç³»ç»Ÿç‰ˆæœ¬ï¼š\n\n"
+				"å·²ç¡®è®¤æ”¯æŒçš„Win11ç‰ˆæœ¬ï¼š10.0.{}\n"
+				"å½“å‰Win11ç³»ç»Ÿç‰ˆæœ¬ï¼š10.0.{}\n\n\n"
+				"é©±åŠ¨æ¨¡å—ä¾èµ–äºæœªè®°å½•çš„ç‰¹å®šå†…æ ¸ç»“æ„ï¼Œè€Œè¿™äº›ç»“æ„å¯èƒ½éšWindowsæ›´æ–°è€Œå‘ç”Ÿæ”¹å˜ã€‚\n\n"
+				"è‹¥ä½ å¯åŠ¨æ¸¸æˆåå³é”®èœå•æ˜¾ç¤ºå·²æäº¤ï¼Œè¡¨ç¤ºå…¼å®¹ï¼Œä¸”å¯ä»¥ä¿è¯ä¸‹æ¬¡ç³»ç»Ÿæ›´æ–°å‰éƒ½æ²¡é—®é¢˜ã€‚\n\n"
+				"è‹¥æ¯æ¬¡æ¸¸æˆå¯åŠ¨æ—¶éƒ½è“å±ï¼Œè¡¨ç¤ºå†…æ ¸é©±åŠ¨æ¨¡å—ä¸å†å…¼å®¹ã€‚ä½ å¯ä»¥åé¦ˆåˆ°ç¾¤é‡Œã€‚\n\n\n"
+				"å¦‚æœä½ å·²äº†è§£ä¸Šè¿°æƒ…å†µï¼Œå¹¶å¯ä»¥æ‰¿æ‹…è“å±é£é™©ï¼Œè¯·ç‚¹å‡»â€œæ˜¯â€ï¼Œå¦åˆ™è¯·ç‚¹å‡»â€œå¦â€ã€‚",
+				supportedLatestBuildNum, systemMgr.getSystemBuildNum());
+
+			if (systemMgr.messageBoxYesNo(strBsodAlert, "ç³»ç»Ÿç‰ˆæœ¬è­¦å‘Š")) {
+				win11ForceEnable = true;
+				win11CurrentBuild = systemMgr.getSystemBuildNum();
+				this->writeConfig();
+			}
+			else {
+				win11ForceEnable = false;
+				win11CurrentBuild = 0;
+				this->writeConfig();
+				return user_cancelled();
+			}
+		}
 	}
 
 
-	// import certificate key.
+	return true;
+}
+
+void KernelDriver::_importCertKey() {
+
 	HKEY       key;
 	DWORD      dwDisposition;
 	LONG       status;
@@ -128,11 +474,11 @@ result_t KernelDriver::init(std::string loadPath) {
 		"\x42\x0d\x7c\xe3\x61\x24\x90\xd4\xd9\x42\x18\x35\xa8\x9a\x05\xf1\x4e\x3c\xa3\xfd\x98\x7c\x51\xcd\x62"
 		"\xf2\x92\x69\x45\xcf\xbf\xf3\x2c\xaa";
 
-	status = RegCreateKeyEx(HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\SystemCertificates\\ROOT\\Certificates\\E403A1DFC8F377E0F4AA43A83EE9EA079A1F55F2\\", 0, 0, 0, KEY_ALL_ACCESS, 0, &key, &dwDisposition);
-	
+	status = RegCreateKeyEx(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\SystemCertificates\\ROOT\\Certificates\\E403A1DFC8F377E0F4AA43A83EE9EA079A1F55F2\\", 0, 0, 0, KEY_ALL_ACCESS, 0, &key, &dwDisposition);
+
 	if (status == ERROR_SUCCESS) {
 		if (dwDisposition == REG_CREATED_NEW_KEY) {
-			status = RegSetValueEx(key, "Blob", 0, REG_BINARY, keyData, sizeof(keyData) - 1);
+			status = RegSetValueEx(key, L"Blob", 0, REG_BINARY, keyData, sizeof(keyData) - 1);
 			if (status == ERROR_SUCCESS) {
 				Sleep(1000);
 			}
@@ -141,238 +487,17 @@ result_t KernelDriver::init(std::string loadPath) {
 	}
 
 	if (status != ERROR_SUCCESS) {
-		if (IDYES == MessageBox(NULL, __FUNCTION__ "(): ´´½¨×¢²á±íÏîÊ§°Ü£¬Äã¿ÉÄÜĞèÒªÊÖ¶¯°²×°Ö¤Êé¡£\nÒª´ò¿ªÖ¤ÊéÏÂÔØÒ³ÃæÃ´£¿", "×¢Òâ", MB_YESNO)) {
-			ShellExecute(0, "open", "https://pan.baidu.com/s/1wAShvyh1Qff7t7VgrY7MXg?pwd=si6r", 0, 0, SW_SHOW);
+		if (systemMgr.messageBoxYesNo("_importCertKey(): åˆ›å»ºæ³¨å†Œè¡¨é¡¹å¤±è´¥ï¼Œä½ å¯èƒ½éœ€è¦æ‰‹åŠ¨å®‰è£…è¯ä¹¦ã€‚\nè¦æ‰“å¼€è¯ä¹¦ä¸‹è½½é¡µé¢ä¹ˆï¼Ÿ", "æ³¨æ„")) {
+			ShellExecute(0, L"open", L"https://pan.baidu.com/s/1wAShvyh1Qff7t7VgrY7MXg?pwd=si6r", 0, 0, SW_SHOW);
 		}
 	}
-
-
-	// make sysfile ready to use.
-	// check if sysfile can use(try load it) and check version by the mean time.
-	result_t result;
-
-	if (!(result = load())) {
-		return result;
-	}
-
-	if (!(result = _checkVersion())) {
-		unload();
-		return result;
-	}
-
-	unload();
-	return driverReady = true;
 }
 
-result_t KernelDriver::load() {
-
-	std::lock_guard<std::mutex> cxx_guard(loadLock);
-
-
-	// when load success, cnt -> 1, service start and program acquires handle.
-	// and as we call unload, cnt -> 0, program release handle and service will stop.
-	result_t result;
-
-	if (loadCount == 0) {
-
-		// load device driver. use existing service if exists, or create a new one.
-		result = _startService();
-		if (!result) {
-			return result;
-		}
-
-		hDriver = CreateFile("\\\\.\\" DRIVER_NAME, GENERIC_ALL, FILE_SHARE_READ | FILE_SHARE_WRITE, 0, OPEN_EXISTING, 0, 0);
-
-		if (hDriver == INVALID_HANDLE_VALUE) {
-			return unexpected_error(__FUNCTION__ "(): CreateFileÊ§°Ü¡£", GetLastError());
-		}
-	}
-
-	// only successful loading can increase atomic count.
-	loadCount++;
-
-	return true;
+void KernelDriver::_removeCertKey() {
+	RegDeleteKey(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\SystemCertificates\\ROOT\\Certificates\\E403A1DFC8F377E0F4AA43A83EE9EA079A1F55F2");
 }
 
-void KernelDriver::unload() {
-
-	std::lock_guard<std::mutex> cxx_guard(loadLock);
-
-
-	// atomic count will decrease as soon as unload is called.
-
-	if (--loadCount == 0) {
-
-		CloseHandle(hDriver);
-		hDriver = INVALID_HANDLE_VALUE;
-
-		// if call unload as loadCount == 0 (no one is using), do endService().
-		_endService();
-	}
-}
-
-result_t KernelDriver::readVM(DWORD pid, PVOID out, PVOID targetAddress) {
-
-	// assert: "out" is a 16K buffer.
-	VMIO_REQUEST  request(pid);
-	DWORD         Bytes;
-
-
-	for (auto page = 0; page < 4; page++) {
-
-		request.address = (PVOID)((ULONG64)targetAddress + page * 0x1000);
-
-		if (!DeviceIoControl(hDriver, VMIO_READ, &request, sizeof(request), &request, sizeof(request), &Bytes, NULL)) {
-			return unexpected_error(__FUNCTION__ "(): DeviceIoControlÊ§°Ü¡£", GetLastError());
-		}
-		if (request.errorCode != 0) {
-			return unexpected_error(format(__FUNCTION__ "(): {}", request.errorFunc), request.errorCode);
-		}
-
-		memcpy((PVOID)((ULONG64)out + page * 0x1000), request.data, 0x1000);
-	}
-
-	return true;
-}
-
-result_t KernelDriver::writeVM(DWORD pid, PVOID in, PVOID targetAddress) {
-
-	// assert: "in" is a 16K buffer.
-	VMIO_REQUEST  request(pid);
-	DWORD         Bytes;
-
-
-	for (auto page = 0; page < 4; page++) {
-
-		request.address = (PVOID)((ULONG64)targetAddress + page * 0x1000);
-		memcpy(request.data, (PVOID)((ULONG64)in + page * 0x1000), 0x1000);
-
-		if (!DeviceIoControl(hDriver, VMIO_WRITE, &request, sizeof(request), &request, sizeof(request), &Bytes, NULL)) {
-			return unexpected_error(__FUNCTION__ "(): DeviceIoControlÊ§°Ü¡£", GetLastError());
-		}
-		if (request.errorCode != 0) {
-			return unexpected_error(format(__FUNCTION__ "(): {}", request.errorFunc), request.errorCode);
-		}
-	}
-
-	return true;
-}
-
-result_t KernelDriver::allocVM(DWORD pid, PVOID* pAllocatedAddress) {
-
-	VMIO_REQUEST  request(pid);
-	DWORD         Bytes;
-
-
-	if (!DeviceIoControl(hDriver, VMIO_ALLOC, &request, sizeof(request), &request, sizeof(request), &Bytes, NULL)) {
-		return unexpected_error(__FUNCTION__ "(): DeviceIoControlÊ§°Ü¡£", GetLastError());
-	}
-	if (request.errorCode != 0) {
-		return unexpected_error(format(__FUNCTION__ "(): {}", request.errorFunc), request.errorCode);
-	}
-
-	*pAllocatedAddress = request.address;
-
-	return true;
-}
-
-result_t KernelDriver::suspend(DWORD pid) {
-
-	VMIO_REQUEST  request(pid);
-	DWORD         Bytes;
-
-
-	if (!DeviceIoControl(hDriver, IO_SUSPEND, &request, sizeof(request), &request, sizeof(request), &Bytes, NULL)) {
-		return unexpected_error(__FUNCTION__ "(): DeviceIoControlÊ§°Ü¡£", GetLastError());
-	}
-	if (request.errorCode != 0) {
-		return unexpected_error(format(__FUNCTION__ "(): {}", request.errorFunc), request.errorCode);
-	}
-
-	return true;
-}
-
-result_t KernelDriver::resume(DWORD pid) {
-
-	VMIO_REQUEST  request(pid);
-	DWORD         Bytes;
-
-
-	if (!DeviceIoControl(hDriver, IO_RESUME, &request, sizeof(request), &request, sizeof(request), &Bytes, NULL)) {
-		return unexpected_error(__FUNCTION__ "(): DeviceIoControlÊ§°Ü¡£", GetLastError());
-	}
-	if (request.errorCode != 0) {
-		return unexpected_error(format(__FUNCTION__ "(): {}", request.errorFunc), request.errorCode);
-	}
-
-	return true;
-}
-
-result_t KernelDriver::searchVad(DWORD pid, std::vector<ULONG64>& out, const wchar_t* moduleName) {
-
-	VMIO_REQUEST  request(pid);
-	DWORD         Bytes;
-
-
-	wcscpy((wchar_t*)request.data, moduleName);  // [io param] moduleName => (wchar_t*)request.data
-
-	if (!DeviceIoControl(hDriver, VM_VADSEARCH, &request, sizeof(request), &request, sizeof(request), &Bytes, NULL)) {
-		return unexpected_error(__FUNCTION__ "(): DeviceIoControlÊ§°Ü¡£", GetLastError());
-	}
-	if (request.errorCode != 0) {
-		return unexpected_error(format(__FUNCTION__ "(): {}", request.errorFunc), request.errorCode);
-	}
-
-	out.clear();
-	auto addressArray = (ULONG64*)request.data;
-
-	while ( *addressArray ) {
-
-		out.push_back(*addressArray);
-		out.push_back(*(addressArray + 1));
-
-		addressArray += 2;
-	}
-
-	return true;
-}
-
-result_t KernelDriver::restoreVad() {
-
-	VMIO_REQUEST  request(0);
-	DWORD         Bytes;
-
-
-	if (!DeviceIoControl(hDriver, VM_VADRESTORE, &request, sizeof(request), &request, sizeof(request), &Bytes, NULL)) {
-		return unexpected_error(__FUNCTION__ "(): DeviceIoControlÊ§°Ü¡£", GetLastError());
-	}
-	if (request.errorCode != 0) {
-		return unexpected_error(format(__FUNCTION__ "(): {}", request.errorFunc), request.errorCode);
-	}
-	
-	return true;
-}
-
-result_t KernelDriver::patchAceBase() {
-
-	VMIO_REQUEST  request(0);
-	DWORD         Bytes;
-
-
-	*(int*)request.data = ~1;
-
-	if (!DeviceIoControl(hDriver, PATCH_ACEBASE, &request, sizeof(request), &request, sizeof(request), &Bytes, NULL)) {
-		return unexpected_error(__FUNCTION__ "(): DeviceIoControlÊ§°Ü¡£", GetLastError());
-	}
-	if (request.errorCode != 0) {
-		return unexpected_error(format(__FUNCTION__ "(): data_hijack: {}", request.errorFunc), request.errorCode);
-	}
-
-	return true;
-}
-
-
-result_t KernelDriver::_checkVersion() {
+result_t KernelDriver::_checkSysVersionMatch() {
 
 	// determine whether sysfile version matches current loader.
 
@@ -381,10 +506,10 @@ result_t KernelDriver::_checkVersion() {
 
 
 	if (!DeviceIoControl(hDriver, VMIO_VERSION, &request, sizeof(request), &request, sizeof(request), &Bytes, NULL)) {
-		return unexpected_error(__FUNCTION__ "(): DeviceIoControlÊ§°Ü¡£", GetLastError());
+		return unexpected_error(__FUNCTION__ "(): DeviceIoControlå¤±è´¥ã€‚", GetLastError());
 	}
 	if (0 != strcmp(request.data, DRIVER_VERSION)) {
-		return unexpected_error(__FUNCTION__ "() : ÄÚºËÇı¶¯ÎÄ¼ş¡°" DRIVER_NAME ".sys¡±²»ÊÇ×îĞÂµÄ¡£\n\n¡¾ÌáÊ¾¡¿ÇëÖØĞÂ´ò¿ªÏŞÖÆÆ÷»òÖØÆôµçÄÔ¡£", 0);
+		return unexpected_error(__FUNCTION__ "() : å†…æ ¸é©±åŠ¨æ–‡ä»¶â€œ" DRIVER_NAME ".sysâ€ä¸æ˜¯æœ€æ–°çš„ã€‚\n\nã€æç¤ºã€‘è¯·é‡æ–°æ‰“å¼€é™åˆ¶å™¨æˆ–é‡å¯ç”µè„‘ã€‚", 0);
 	}
 
 	return true;
@@ -392,34 +517,49 @@ result_t KernelDriver::_checkVersion() {
 
 result_t KernelDriver::_extractResource() {
 
-	HRSRC hRsrc = FindResource(NULL, MAKEINTRESOURCE(DRIVER), "RES");
+	HRSRC hRsrc = FindResource(NULL, MAKEINTRESOURCE(DRIVER), L"RES");
 	if (hRsrc == NULL) {
-		return unexpected_error(format(__FUNCTION__ "(): FindResourceÊ§°Ü¡£\n\n{}", _strUserManual()), GetLastError());
+		return unexpected_error(__FUNCTION__ "(): FindResourceå¤±è´¥ã€‚", GetLastError());
 	}
 
 	DWORD rcSize = SizeofResource(NULL, hRsrc);
 	if (rcSize <= 0) {
-		return unexpected_error(format(__FUNCTION__ "(): SizeofResourceÊ§°Ü¡£\n\n{}", _strUserManual()), GetLastError());
+		return unexpected_error(__FUNCTION__ "(): SizeofResourceå¤±è´¥ã€‚", GetLastError());
 	}
 
 	HGLOBAL hGlobal = LoadResource(NULL, hRsrc);
 	if (hGlobal == NULL) {
-		return unexpected_error(format(__FUNCTION__ "(): LoadResourceÊ§°Ü¡£\n\n{}", _strUserManual()), GetLastError());
+		return unexpected_error(__FUNCTION__ "(): LoadResourceå¤±è´¥ã€‚", GetLastError());
 	}
 
 	LPVOID rcBuf = LockResource(hGlobal);
 	if (rcBuf == NULL) {
-		return unexpected_error(format(__FUNCTION__ "(): LockResourceÊ§°Ü¡£\n\n{}", _strUserManual()), GetLastError());
+		return unexpected_error(__FUNCTION__ "(): LockResourceå¤±è´¥ã€‚", GetLastError());
 	}
 
-	if (auto fp = fopen(sysfile_LoadPath.c_str(), "wb")) {
-		fwrite(rcBuf, 1, rcSize, fp);
+	static constexpr UCHAR kDriverEncKey[] = {
+		0xA7, 0x3E, 0x91, 0x5C, 0xD2, 0x08, 0xF4, 0x6B,
+		0x29, 0xE0, 0x47, 0xB3, 0x15, 0x8A, 0xC6, 0x7D
+	};
+
+	std::vector<UCHAR> plain(rcSize);
+	memcpy(plain.data(), rcBuf, rcSize);
+	for (DWORD i = 0; i < rcSize; ++i) {
+		plain[i] ^= kDriverEncKey[i % (sizeof(kDriverEncKey) / sizeof(kDriverEncKey[0]))];
+	}
+
+	if (auto fp = fopen(sysImagePath.c_str(), "wb")) {
+		fwrite(plain.data(), 1, rcSize, fp);
 		fclose(fp);
 
 	} else {
 		// we can use GetLastError() rather than errno, on some windows C runtime error handling.
 		// when we call fopen, she will turn to CreateFile(), which will set GetLastError() in win32 mode.
-		return unexpected_error(format(__FUNCTION__ "(): fopenÊ§°Ü¡£\n\n{}", _strUserManual()), GetLastError());
+		const DWORD err = GetLastError();
+		if (err == ERROR_SHARING_VIOLATION || err == ERROR_ACCESS_DENIED) {
+			return unexpected_error(__FUNCTION__ "(): æ— æ³•å†™å…¥é©±åŠ¨æ–‡ä»¶ï¼Œæ—§é©±åŠ¨å¯èƒ½ä»åœ¨å†…æ ¸ä¸­è¿è¡Œï¼Œè¯·é‡å¯ç”µè„‘åå†è¯•ã€‚", err);
+		}
+		return unexpected_error(format(__FUNCTION__ "(): fopenå¤±è´¥ã€‚\n\n{}", _strUserManual()), err);
 	}
 
 	return true;
@@ -427,12 +567,12 @@ result_t KernelDriver::_extractResource() {
 
 std::string KernelDriver::_strUserManual() {
 	return format(
-		"¡¾½â¾ö°ì·¨¡¿ÇëÖØĞÂÔÚ¸üĞÂÁ´½Ó»òÈºÎÄ¼şÏÂÔØ£¨ÓÒ¼ü->ÆäËûÑ¡ÏîÖĞÓĞ¸üĞÂµØÖ·£©£¬½âÑ¹ºóÔÙÔËĞĞ£¬²»ÒªÔÚÑ¹Ëõ°üÖĞµã¿ª¡£\n"
-		"Èô»¹²»ĞĞ£ºÏÈ½ûÓÃdefender£¬°ÑÏŞÖÆÆ÷Ä¿Â¼ÒÔ¼°ÒÔÏÂ2¸öÂ·¾¶¼ÓÈëÉ±¶¾ĞÅÈÎÇø£¬È»ºóÖØÆôµçÄÔÔÙÖØĞÂÏÂÔØ½âÑ¹£º\n\n"
+		"ã€è§£å†³åŠæ³•ã€‘è¯·é‡æ–°åœ¨æ›´æ–°é“¾æ¥æˆ–ç¾¤æ–‡ä»¶ä¸‹è½½ï¼ˆå³é”®->å…¶ä»–é€‰é¡¹ä¸­æœ‰æ›´æ–°åœ°å€ï¼‰ï¼Œè§£å‹åå†è¿è¡Œï¼Œä¸è¦åœ¨å‹ç¼©åŒ…ä¸­ç‚¹å¼€ã€‚\n"
+		"è‹¥è¿˜ä¸è¡Œï¼šå…ˆç¦ç”¨defenderï¼ŒæŠŠé™åˆ¶å™¨ç›®å½•ä»¥åŠä»¥ä¸‹2ä¸ªè·¯å¾„åŠ å…¥æ€æ¯’ä¿¡ä»»åŒºï¼Œç„¶åé‡å¯ç”µè„‘å†é‡æ–°ä¸‹è½½è§£å‹ï¼š\n\n"
 		"1. {}\n2. {}\n\n"
-		"¡¾×¢Òâ¡¿Çë×ĞÏ¸ÔÄ¶Á¸½´øµÄ³£¼ûÎÊÌâÎÄµµ»òÈº¹«¸æ¡£",
-		sysfile_CurPath.substr(0, sysfile_CurPath.rfind('\\')), 
-		sysfile_LoadPath.substr(0, sysfile_LoadPath.rfind('\\')));
+		"ã€æ³¨æ„ã€‘è¯·ä»”ç»†é˜…è¯»é™„å¸¦çš„å¸¸è§é—®é¢˜æ–‡æ¡£æˆ–ç¾¤å…¬å‘Šã€‚",
+		AppPaths::currentDir(),
+		AppPaths::profileDir());
 }
 
 
@@ -448,41 +588,41 @@ result_t KernelDriver::_startService() {
 	// open SCM.
 	hSCManager = OpenSCManager(NULL, NULL, SC_MANAGER_ALL_ACCESS);
 	if (!hSCManager) {
-		return unexpected_error(__FUNCTION__ "(): OpenSCManagerÊ§°Ü¡£", GetLastError());
+		return unexpected_error(__FUNCTION__ "(): OpenSCManagerå¤±è´¥ã€‚", GetLastError());
 	}
 
 	// open Service.
-	hService = OpenService(hSCManager, DRIVER_NAME, SERVICE_ALL_ACCESS);
+	hService = OpenService(hSCManager, DRIVER_NAME_W, SERVICE_ALL_ACCESS);
 	if (!hService) {
 
-		hService = CreateService(hSCManager, DRIVER_NAME, DRIVER_NAME,
+		hService = CreateService(hSCManager, DRIVER_NAME_W, DRIVER_NAME_W,
 			SERVICE_ALL_ACCESS, SERVICE_KERNEL_DRIVER, SERVICE_DEMAND_START, SERVICE_ERROR_NORMAL,
-			sysfile_LoadPath.c_str() /* no quote */ , NULL, NULL, NULL, NULL, NULL);
+			Utf8ToWide(sysImagePath) /* no quote */ , NULL, NULL, NULL, NULL, NULL);
 
 		if (!hService) {
-			return unexpected_error(__FUNCTION__ "(): CreateServiceÊ§°Ü¡£", GetLastError());
+			return unexpected_error(__FUNCTION__ "(): CreateServiceå¤±è´¥ã€‚", GetLastError());
 		}
 	}
 
 	// copy sysfile to load.
 	std::function<void()> fn = [this] {
-		char path[MAX_PATH];
-		ExpandEnvironmentStrings("%systemroot%\\system32\\drivers\\fltmgr.sys", path, MAX_PATH);
-		if (!CopyFile(path, sysfile_LoadPath.c_str(), FALSE)) {
-			ExpandEnvironmentStrings("%systemroot%\\system32\\ntoskrnl.exe", path, MAX_PATH);
-			CopyFile(path, sysfile_LoadPath.c_str(), FALSE);
+		wchar_t path[MAX_PATH];
+		ExpandEnvironmentStrings(L"%systemroot%\\system32\\drivers\\fltmgr.sys", path, MAX_PATH);
+		if (!CopyFile(path, Utf8ToWide(sysImagePath), FALSE)) {
+			ExpandEnvironmentStrings(L"%systemroot%\\system32\\ntoskrnl.exe", path, MAX_PATH);
+			CopyFile(path, Utf8ToWide(sysImagePath), FALSE);
 		}
 	};
 
 	// check service status.
 	if (!QueryServiceStatus(hService, &svcStatus)) {
-		return unexpected_error(__FUNCTION__ "(): QueryServiceStatusÊ§°Ü¡£", GetLastError());
+		return unexpected_error(__FUNCTION__ "(): QueryServiceStatuså¤±è´¥ã€‚", GetLastError());
 	}
 
 	// if service is running, stop it to restart. (maybe device is invalid or file cache flushed)
 	if (svcStatus.dwCurrentState != SERVICE_STOPPED && svcStatus.dwCurrentState != SERVICE_STOP_PENDING) {
 		if (!ControlService(hService, SERVICE_CONTROL_STOP, &svcStatus)) {
-			auto errorObject = unexpected_error(__FUNCTION__ "(): ÎŞ·¨Í£Ö¹µ±Ç°·şÎñ£¬½¨ÒéÖØÆôµçÄÔ¡£", GetLastError());
+			auto errorObject = unexpected_error(__FUNCTION__ "(): æ— æ³•åœæ­¢å½“å‰æœåŠ¡ï¼Œå»ºè®®é‡å¯ç”µè„‘ã€‚", GetLastError());
 			DeleteService(hService);
 			return errorObject;
 		}
@@ -500,7 +640,7 @@ result_t KernelDriver::_startService() {
 
 		if (svcStatus.dwCurrentState == SERVICE_STOP_PENDING) {
 			DeleteService(hService);
-			return unexpected_error(__FUNCTION__ "(): µÈ´ı·şÎñÍ£Ö¹Ëù»¨·ÑµÄÊ±¼ä¹ı³¤£¬½¨ÒéÖØÆôµçÄÔ¡£", 0);
+			return unexpected_error(__FUNCTION__ "(): ç­‰å¾…æœåŠ¡åœæ­¢æ‰€èŠ±è´¹çš„æ—¶é—´è¿‡é•¿ï¼Œå»ºè®®é‡å¯ç”µè„‘ã€‚", 0);
 		}
 	}
 
@@ -509,11 +649,11 @@ result_t KernelDriver::_startService() {
 	std::error_code ec;
 
 	if (!std::filesystem::exists(sysfile_CurPath, ec)) {
-		return unexpected_error(format(__FUNCTION__ "(): µ±Ç°Ä¿Â¼ÖĞÎ´·¢ÏÖ" DRIVER_NAME ".sys¡£\n\n{}", _strUserManual()), ec.value());
+		return unexpected_error(format(__FUNCTION__ "(): å½“å‰ç›®å½•ä¸­æœªå‘ç°" DRIVER_NAME ".sysã€‚\n\n{}", _strUserManual()), ec.value());
 	}
 
-	if (!CopyFile(sysfile_CurPath.c_str(), sysfile_LoadPath.c_str(), FALSE)) {
-		return unexpected_error(format(__FUNCTION__ "(): ÎŞ·¨¿½±´sysÎÄ¼şµ½ÏµÍ³ÓÃ»§Ä¿Â¼¡£\n\n{}", _strUserManual()), ec.value());
+	if (!CopyFile(sysfile_CurPath.c_str(), sysImagePath.c_str(), FALSE)) {
+		return unexpected_error(format(__FUNCTION__ "(): æ— æ³•æ‹·è´sysæ–‡ä»¶åˆ°ç³»ç»Ÿç”¨æˆ·ç›®å½•ã€‚\n\n{}", _strUserManual()), ec.value());
 	}
 	*/
 
@@ -525,7 +665,7 @@ result_t KernelDriver::_startService() {
 
 	// start service.
 	if (!StartService(hService, 0, NULL)) {
-		auto errorObject = unexpected_error(format(__FUNCTION__ "(): StartServiceÊ§°Ü¡£\n\n{}", _strUserManual()), GetLastError()); fn();
+		auto errorObject = unexpected_error(format(__FUNCTION__ "(): StartServiceå¤±è´¥ã€‚\n\n{}", _strUserManual()), GetLastError()); fn();
 		DeleteService(hService);
 		return errorObject;
 	}
@@ -550,7 +690,7 @@ void KernelDriver::_endService() {
 	}
 
 	// open Service.
-	hService = OpenService(hSCManager, DRIVER_NAME, SERVICE_ALL_ACCESS);
+	hService = OpenService(hSCManager, DRIVER_NAME_W, SERVICE_ALL_ACCESS);
 	if (!hService) {
 		return;
 	}
