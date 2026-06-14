@@ -40,10 +40,6 @@
     </ClInclude>
     <ClInclude Include="config.h">
       <Filter>config</Filter>
-    </ClInclude>
-    <ClInclude Include="tiny_format.h">
-      <Filter>util</Filter>
-    </ClInclude>
     <ClInclude Include="win32utility.h" />
     <ClInclude Include="transproxy.h">
       <Filter>proxy</Filter>
@@ -83,7 +79,8 @@
     <Image Include="donate.bmp" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="..\x64\Release\Hutaok.sys" />
+    <None Include="..\x64\Release\Embedded\Hutaok.sys" />
+    <None Include="..\x64\Release\Embedded\Hutaok_CI.sys" />
   </ItemGroup>
   <ItemGroup>
     <Manifest Include="app.manifest" />

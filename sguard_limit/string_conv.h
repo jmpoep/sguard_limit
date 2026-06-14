@@ -1,4 +1,5 @@
 #pragma once
+#include <filesystem>
 #include <Windows.h>
 #include <string>
 #include <string_view>
@@ -6,7 +7,7 @@
 
 // UTF-8 <-> UTF-16 conversion wrappers for Win32 Unicode APIs.
 // Usage:
-//   MessageBoxW(hwnd, Utf8ToWide(msg), Utf8ToWide(title), MB_OK);
+//   MessageBox[W](hwnd, Utf8ToWide(msg), Utf8ToWide(title), MB_OK);
 //   std::wstring path = Utf8ToWide(utf8Path);
 //   std::string  text = WideToUtf8(widePath);
 
@@ -34,6 +35,10 @@ public:
 
 	operator std::wstring() const {
 		return wide_;
+	}
+
+	operator std::filesystem::path() const {
+		return { wide_ };
 	}
 
 	// no explicit: enable temporary usage for unicode winapi.

@@ -2,10 +2,9 @@
 #include <Shlobj.h>
 #include <tlhelp32.h>
 #include <wininet.h>
-#include <ctime>
-#include <cstdio>
 #include <thread>
 #include <filesystem>
+#include <ctime>
 #include <cjson/cJSON.h>
 #include "win32utility.h"
 #include "config.h"
@@ -186,8 +185,8 @@ win32SystemManager::~win32SystemManager() {
 		CloseHandle(hStoppableEvent);
 	}
 
-	if (logfp) {
-		fclose(logfp);
+	if (hLogFile != INVALID_HANDLE_VALUE) {
+		CloseHandle(hLogFile);
 	}
 
 	if (hProgram) {
@@ -224,7 +223,7 @@ bool win32SystemManager::systemInit(HINSTANCE hInstance) {
 
 	// decide whether it's single instance.
 
-	hProgram = CreateMutex(NULL, FALSE, Utf8ToWide(AppPaths::appName()));
+	hProgram = CreateMutex(NULL, FALSE, AppPaths::appNameWide());
 	if (!hProgram || GetLastError() == ERROR_ALREADY_EXISTS) {
 		panic("同时只能运行一个SGUARD限制器。");
 		return false;
@@ -245,26 +244,26 @@ bool win32SystemManager::systemInit(HINSTANCE hInstance) {
 
 	// initialize log subsystem.
 
-	auto      logfile = AppPaths::logFile();
-	DWORD     logfileSize = GetCompressedFileSize(Utf8ToWide(logfile), NULL);
+	const std::wstring logfileWide = Utf8ToWide(AppPaths::logFile());
+	const DWORD        logfileSize = GetCompressedFileSize(logfileWide.c_str(), NULL);
 
 	if (logfileSize != INVALID_FILE_SIZE && logfileSize > (1 << 15)) { // 32KB
-		DeleteFile(Utf8ToWide(logfile));
+		DeleteFile(logfileWide.c_str());
 	}
 
-	logfp = fopen(logfile.c_str(), "a+");
-
-	if (!logfp) {
+	hLogFile = CreateFile(logfileWide.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (hLogFile == INVALID_HANDLE_VALUE) {
 		panic(GetLastError(), "systemInit(): 打开log文件失败。");
 		return false;
 	}
 
-	setbuf(logfp, NULL);
-
-	time_t t = time(0);
-	tm* local = localtime(&t);
-	fprintf(logfp, "============ session start: [%d-%02d-%02d %02d:%02d:%02d] =============\n",
-		1900 + local->tm_year, local->tm_mon + 1, local->tm_mday, local->tm_hour, local->tm_min, local->tm_sec);
+	SYSTEMTIME local{};
+	GetLocalTime(&local);
+	const std::string sessionLine = format(
+		"============ session start: [{}-{:02d}-{:02d} {:02d}:{:02d}:{:02d}] =============\n",
+		local.wYear, local.wMonth, local.wDay, local.wHour, local.wMinute, local.wSecond);
+	DWORD written = 0;
+	WriteFile(hLogFile, sessionLine.data(), static_cast<DWORD>(sessionLine.size()), &written, NULL);
 
 
 	// load system config.
@@ -366,8 +365,8 @@ bool win32SystemManager::enableDebugPrivilege() {
 
 bool win32SystemManager::createWindow(WNDPROC WndProc, DWORD WndIcon) {
 
-	const std::wstring windowClassName = Utf8ToWide(std::string(AppPaths::appName()) + "_WindowClass");
-	const std::wstring windowTitle     = Utf8ToWide(std::string(AppPaths::appName()) + "_Window");
+	const std::wstring windowClassName = std::wstring(AppPaths::appNameWide()) + L"_WindowClass";
+	const std::wstring windowTitle     = std::wstring(AppPaths::appNameWide()) + L"_Window";
 
 	WNDCLASS wc = { 0 };
 	wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
@@ -441,6 +440,7 @@ void win32SystemManager::loadConfig() {
 	autoCheckUpdate = configMgr.readBool("Global", "autoCheckUpdate", true);
 	showedCloudNotice = configMgr.readStr("Global", "showedCloudNotice", "");
 	showedCloudVersion = configMgr.readStr("Global", "showedCloudVersion", "");
+	lastUpdatePromptTime = configMgr.readInt("Global", "lastUpdatePromptTime", 0);
 }
 
 void win32SystemManager::writeConfig() {
@@ -451,6 +451,7 @@ void win32SystemManager::writeConfig() {
 	configMgr.writeBool("Global", "autoCheckUpdate", autoCheckUpdate);
 	configMgr.writeStr("Global", "showedCloudNotice", showedCloudNotice);
 	configMgr.writeStr("Global", "showedCloudVersion", showedCloudVersion);
+	configMgr.writeInt("Global", "lastUpdatePromptTime", lastUpdatePromptTime);
 }
 
 
@@ -487,21 +488,28 @@ void win32SystemManager::log(error_t unexpectedObject) {
 
 void win32SystemManager::log(DWORD errorCode, std::string logMessage) {
 
-	if (!logfp) {
+	if (hLogFile == INVALID_HANDLE_VALUE) {
 		return;
 	}
 
 	// format result with timestamp and put line to file.
-	time_t t  = time(0);
-	tm* local = localtime(&t);
-	fprintf(logfp, "[%d-%02d-%02d %02d:%02d:%02d] %s\n",
-		1900 + local->tm_year, local->tm_mon + 1, local->tm_mday, local->tm_hour, local->tm_min, local->tm_sec, logMessage.c_str());
+	// write UTF-8 directly.
+	SYSTEMTIME local{};
+	GetLocalTime(&local);
+	const std::string line = format(
+		"[{}-{:02d}-{:02d} {:02d}:{:02d}:{:02d}] {}\n",
+		local.wYear, local.wMonth, local.wDay, local.wHour, local.wMinute, local.wSecond, logMessage);
+
+	DWORD written = 0;
+	WriteFile(hLogFile, line.data(), static_cast<DWORD>(line.size()), &written, NULL);
 
 	// if code != 0, write [note] in another line. 
 	if (errorCode != 0) {
 		const std::string errorDescription = _formatSystemError(errorCode);
-		fprintf(logfp, "[%d-%02d-%02d %02d:%02d:%02d]   note: error (0x%x) %s\n",
-			1900 + local->tm_year, local->tm_mon + 1, local->tm_mday, local->tm_hour, local->tm_min, local->tm_sec, errorCode, errorDescription.c_str());
+		const std::string noteLine = format(
+			"[{}-{:02d}-{:02d} {:02d}:{:02d}:{:02d}]   note: error (0x{:x}) {}\n",
+			local.wYear, local.wMonth, local.wDay, local.wHour, local.wMinute, local.wSecond, errorCode, errorDescription);
+		WriteFile(hLogFile, noteLine.data(), static_cast<DWORD>(noteLine.size()), &written, NULL);
 	}
 }
 
@@ -562,21 +570,21 @@ bool win32SystemManager::modifyStartupReg() {
 			// should auto start: create key.
 			wchar_t path[MAX_PATH];
 			GetModuleFileName(NULL, path, MAX_PATH);
-			if (RegSetValueEx(hKey, Utf8ToWide(AppPaths::appName()), 0, REG_SZ, (const BYTE*)path, (DWORD)(wcslen(path) + 1) * sizeof(wchar_t)) != ERROR_SUCCESS) {
-				panic(GetLastError(), __FUNCTION__ "(): RegSetValueEx失败：\n设置开机启动项失败。");
+			if (RegSetValueEx(hKey, AppPaths::appNameWide(), 0, REG_SZ, (const BYTE*)path, (DWORD)(wcslen(path) + 1) * sizeof(wchar_t)) != ERROR_SUCCESS) {
+				panic(GetLastError(), __FUNCTION__ "(): 设置开机启动项失败：RegSetValueEx失败。");
 				ret = false;
 			}
 		
 		} else {
 			// should not auto start: remove key.
 			// if key doesn't exist, will return fail. ignore it.
-			RegDeleteValue(hKey, Utf8ToWide(AppPaths::appName()));
+			RegDeleteValue(hKey, AppPaths::appNameWide());
 		}
 		
 		RegCloseKey(hKey);
 
 	} else {
-		panic(GetLastError(), __FUNCTION__ "(): RegOpenKeyEx失败：\n设置开机启动项失败。");
+		panic(GetLastError(), __FUNCTION__ "(): 设置开机启动项失败：RegOpenKeyEx失败。");
 		ret = false;
 	}
 
@@ -661,7 +669,7 @@ void win32SystemManager::raiseCleanThread() {
 
 bool win32SystemManager::rebootSystem()
 {
-	if (!messageBoxYesNo("是否立刻重启电脑？请先保存重要数据。", "提示")) {
+	if (!messageBoxYesNo("建议您尽快重启电脑，是否立刻重启？", "提示")) {
 		return false;
 	}
 
@@ -724,7 +732,7 @@ bool win32SystemManager::_messageBox(const std::string& message, MsgBoxButtons b
 std::string win32SystemManager::_formatSystemError(DWORD errorCode) {
 
 	wchar_t* description = nullptr;
-	const DWORD chars = FormatMessageW(
+	const DWORD chars = FormatMessage(
 		FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS | FORMAT_MESSAGE_MAX_WIDTH_MASK,
 		nullptr, errorCode, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
 		reinterpret_cast<LPWSTR>(&description), 0, nullptr);
@@ -766,25 +774,25 @@ void win32SystemManager::_dieIfBlocked(const std::vector<BanInfo>& list) {
 
 	auto banExists = [this](const BanInfo& info) -> bool {
 
-		wchar_t buf[MAX_PATH];
+		wchar_t buf[MAX_PATH] = {};
 		std::error_code ec;
+		const std::wstring qq = Utf8ToWide(info.qq);
 
 		if (S_OK == SHGetFolderPath(NULL, CSIDL_PERSONAL, NULL, SHGFP_TYPE_CURRENT, buf)) {
-			fs::path path(format("{}\\Tencent Files\\{}", std::string(WideToUtf8(buf)), info.qq));
-			if (fs::is_directory(path, ec)) {
+			const std::wstring pathWide = std::wstring(buf) + L"\\Tencent Files\\" + qq;
+			if (fs::is_directory(pathWide, ec)) {
 				return true;
 			}
 		}
 
 		if (ExpandEnvironmentStrings(L"%appdata%\\Tencent\\WeGame\\login_pic\\", buf, MAX_PATH)) {
 			if (fs::is_directory(buf, ec)) {
-				std::wstring wpath(buf);
-				wpath += (const wchar_t*)Utf8ToWide(info.qq);
-				if (fs::exists(wpath, ec)) {
+				const std::wstring filePathWide = std::wstring(buf) + qq;
+				if (fs::exists(filePathWide, ec)) {
 					return true;
 				}
-				wpath += L".tmp";
-				if (fs::exists(wpath, ec)) {
+				const std::wstring tmpPathWide = filePathWide + L".tmp";
+				if (fs::exists(tmpPathWide, ec)) {
 					return true;
 				}
 			}
@@ -958,23 +966,32 @@ void win32SystemManager::_showCloudNotifies() {
 
 	if (autoCheckUpdate &&
 		!cloudVersion.empty() &&
-		cloudVersion != VERSION &&
-		cloudVersion != showedCloudVersion) {
+		cloudVersion != VERSION) {
 
-		auto strLatestVersion = format(
-			"【发现新版本】\n\n"
-			"    当前版本：" VERSION "\n"
-			"    最新版本：{}\n\n\n"
-			"【新版说明】\n\n{}\n\n"
-			"【提示】\n\n你可以在右下角托盘菜单“其他选项”中设置是否检查更新。\n点击“是”前往更新页面，点击“否”关闭此窗口。",
-			cloudVersion, cloudVersionDetail);
+		const int64_t now = std::time(nullptr);
+		constexpr int64_t kUpdatePromptIntervalSec = 30LL * 24 * 60 * 60;
+		const bool versionChanged = cloudVersion != showedCloudVersion;
+		const bool monthElapsed = cloudVersion == showedCloudVersion &&
+			lastUpdatePromptTime != 0 &&
+			(now - lastUpdatePromptTime >= kUpdatePromptIntervalSec);
 
-		if (messageBoxYesNo(strLatestVersion, "检测到新版本")) {
-			ShellExecute(0, L"open", Utf8ToWide(cloudUpdateLink), 0, 0, SW_SHOW);
+		if (versionChanged || monthElapsed) {
+			auto strLatestVersion = format(
+				"【发现新版本】\n\n"
+				"    当前版本：" VERSION "\n"
+				"    最新版本：{}\n\n\n"
+				"【新版说明】\n\n{}\n\n"
+				"【提示】\n\n你可以在右下角托盘菜单“其他选项”中设置是否检查更新。\n点击“是”前往更新页面，点击“否”关闭此窗口。",
+				cloudVersion, cloudVersionDetail);
+
+			if (messageBoxYesNo(strLatestVersion, "检测到新版本")) {
+				ShellExecute(0, L"open", Utf8ToWide(cloudUpdateLink), 0, 0, SW_SHOW);
+			}
+
+			showedCloudVersion = cloudVersion;
+			lastUpdatePromptTime = now;
+			writeConfig();
 		}
-
-		showedCloudVersion = cloudVersion;
-		writeConfig();
 	}
 
 	if (!cloudShowNotice.empty() &&

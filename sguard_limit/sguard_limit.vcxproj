@@ -101,7 +101,7 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <UACExecutionLevel>RequireAdministrator</UACExecutionLevel>
-      <AdditionalDependencies>Comctl32.lib;Advapi32.lib;wininet.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>Comctl32.lib;Advapi32.lib;wininet.lib;Shlwapi.lib;Psapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Manifest>
       <AdditionalManifestFiles>app.manifest</AdditionalManifestFiles>
@@ -134,7 +134,7 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <UACExecutionLevel>AsInvoker</UACExecutionLevel>
-      <AdditionalDependencies>Comctl32.lib;Advapi32.lib;wininet.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>Comctl32.lib;Advapi32.lib;wininet.lib;Shlwapi.lib;Psapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateMapFile>true</GenerateMapFile>
     </Link>
     <Manifest>
@@ -166,7 +166,7 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <UACExecutionLevel>AsInvoker</UACExecutionLevel>
-      <AdditionalDependencies>Comctl32.lib;Advapi32.lib;wininet.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>Comctl32.lib;Advapi32.lib;wininet.lib;Shlwapi.lib;Psapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Manifest>
       <AdditionalManifestFiles>app.manifest</AdditionalManifestFiles>
@@ -193,7 +193,6 @@
     <ClInclude Include="limitcore.h" />
     <ClInclude Include="mempatch.h" />
     <ClInclude Include="resource.h" />
-    <ClInclude Include="tiny_format.h" />
     <ClInclude Include="win32utility.h" />
     <ClInclude Include="wndproc.h" />
   </ItemGroup>
@@ -205,7 +204,8 @@
     <Image Include="logo.ico" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="..\x64\Release\Hutaok.sys" />
+    <None Include="..\x64\Release\Embedded\Hutaok.sys" />
+    <None Include="..\x64\Release\Embedded\Hutaok_CI.sys" />
   </ItemGroup>
   <ItemGroup>
     <Manifest Include="app.manifest" />

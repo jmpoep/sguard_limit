@@ -3,6 +3,7 @@
 #include <vector>
 #include <atomic>
 #include <mutex>
+#include "resource.h"
 #include "win32utility.h"  // result_t, unexpected_error
 
 
@@ -66,14 +67,17 @@ private:
 	result_t     _runSystemCheck();
 	void         _importCertKey();
 	void         _removeCertKey();
+	bool         _checkPreBoot();
 	result_t     _checkSysVersionMatch();
 	result_t     _extractResource();
-	std::string  _strUserManual();
 	result_t     _startService();
+	std::string  _userManual();
+	std::string  _userManualSafeBoot();
 	void         _endService();
 
 private:
 	std::string         sysImagePath{};
+	UINT                driverResourceId{DRIVER};
 	HANDLE              hDriver{INVALID_HANDLE_VALUE};
 
 	std::atomic<DWORD>  loadCount{0};  // thread sync for: load/unload

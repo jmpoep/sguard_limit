@@ -43,10 +43,10 @@ void ConfigManager::init() {
 
 void ConfigManager::_loadFromFile() {
 	configRoot = toml::table{};
-	if (GetFileAttributes(Utf8ToWide(_configFile)) != INVALID_FILE_ATTRIBUTES) {
+	const std::wstring configPathWide = Utf8ToWide(_configFile);
+	if (GetFileAttributes(configPathWide.c_str()) != INVALID_FILE_ATTRIBUTES) {
 		try {
-			const std::wstring configPath = Utf8ToWide(_configFile);
-			configRoot = toml::parse_file(configPath);
+			configRoot = toml::parse_file(configPathWide);
 		} catch (const toml::parse_error&) {
 			// malformed config - fall back to defaults
 		}
@@ -54,7 +54,8 @@ void ConfigManager::_loadFromFile() {
 }
 
 void ConfigManager::_saveToFile() {
-	std::ofstream ofs(fs::path(_configFile), std::ios::trunc);
+	const std::wstring configPathWide = Utf8ToWide(_configFile);
+	std::ofstream ofs(fs::path(configPathWide), std::ios::trunc);
 	ofs << configRoot;
 }
 

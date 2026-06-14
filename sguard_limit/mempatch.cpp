@@ -20,7 +20,7 @@
 // dependencies
 #include "kdriver.h"
 #include "config.h"
-#include "win32utility.h"  // tiny::format
+#include "win32utility.h"
 
 extern KernelDriver&          driver;
 extern ConfigManager&         configMgr;

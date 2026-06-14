@@ -7,13 +7,13 @@
 #include <thread>
 #include <tuple>
 #include <tl/expected.hpp>  // c++23 p0323r3: not implemented in msvc 14.2
-#include "tiny_format.h"    // std::format/{fmt} generates large file size
+#include <fmt/format.h>
 
 using error_t           = std::tuple<std::string, DWORD>;
 using result_t          = tl::expected<bool, error_t>;
 using unexpected_error  = tl::unexpected<error_t>;
 
-using tiny::format;
+using fmt::format;
 
 
 // system version (kdriver support)
@@ -165,6 +165,7 @@ public:
 	bool                   autoStartup{false};
 	std::string            showedCloudNotice{};
 	std::string            showedCloudVersion{};
+	int64_t                lastUpdatePromptTime{0};
 	bool                   autoCheckUpdate{true};
 	bool                   killAceLoader{true};
 
@@ -179,7 +180,7 @@ private:
 	OSVersion              osVersion{OSVersion::OTHERS};
 	DWORD                  osBuildNum{0};
 
-	FILE*                  logfp{NULL};
+	HANDLE                 hLogFile{INVALID_HANDLE_VALUE};
 	NOTIFYICONDATA         icon{};
 
 	std::thread            cloudGrabThread;

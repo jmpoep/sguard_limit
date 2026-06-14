@@ -185,7 +185,9 @@ IDB_DONATE              BITMAP                  "donate.bmp"
 // RES
 //
 
-DRIVER                  RES                     "..\\x64\\Release\\Hutaok.sys"
+DRIVER                  RES                     "..\\x64\\Release\\Embedded\\Hutaok.sys"
+
+DRIVER_CI               RES                     "..\\x64\\Release\\Embedded\\Hutaok_CI.sys"
 
 #endif    // 中文(简体，中国) resources
 /////////////////////////////////////////////////////////////////////////////

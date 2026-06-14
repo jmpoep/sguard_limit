@@ -781,7 +781,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 			ShellExecute(0, L"open", Utf8ToWide(AppPaths::profileDir()), 0, 0, SW_SHOW);
 			break;
 		case IDM_MORE_UPDATEPAGE:
-			ShellExecute(0, L"open", L"https://space.bilibili.com/1795170/article", 0, 0, SW_SHOW);
+			ShellExecute(0, L"open", L"https://www.bilibili.com/opus/739559386783940721", 0, 0, SW_SHOW);
 			break;
 		case IDM_MORE_SOURCEPAGE:
 			ShellExecute(0, L"open", L"https://github.com/H3d9/sguard_limit", 0, 0, SW_SHOW);

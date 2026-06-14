@@ -1,12 +1,11 @@
 ﻿#include <Windows.h>
-#include <cstdio>
-#include <cstring>
-#include <functional>
+#include <psapi.h>
 #include <vector>
+#include <functional>
 #include "resource.h"
 #include "kdriver.h"
 #include "config.h"
-#include "win32utility.h"  // tiny::format
+#include "win32utility.h"
 #include "app_paths.h"
 #include "string_conv.h"
 
@@ -89,8 +88,11 @@ void KernelDriver::init() {
 	// initialize load path.
 	sysImagePath = AppPaths::profileDir() + "\\" DRIVER_NAME ".sys";
 
+	// import cert key (for CI).
+	_importCertKey();
+
 	// remove cert key for it's no longer needed.
-	_removeCertKey();
+	//_removeCertKey();
 }
 
 bool KernelDriver::checkLoadable() {
@@ -107,10 +109,29 @@ bool KernelDriver::checkLoadable() {
 	}
 
 	// copy image (load > _startService), then try load driver.
-	if (!(result = load())) {
-		systemMgr.panic(result.error());
-		return false;
+	// try Default driver, then CI driver if needed.
+	driverResourceId = DRIVER;
+	result = load();
+
+	if (!result) {
+
+		// if installed preBoot, we can't try fallback driver.
+		// user must disable safeboot or use other mode.
+		if (_checkPreBoot()) {
+			systemMgr.log("checkLoadable(): preBoot installed, CI fallback skipped.");
+			systemMgr.panic(result.error());
+			return false;
+		}
+
+		driverResourceId = DRIVER_CI;
+		result = load();
+		if (!result) {
+			systemMgr.panic(result.error());
+			return false;
+		}
 	}
+
+	systemMgr.log(format("checkLoadable(): selected driver: {}", driverResourceId == DRIVER ? "Default" : "CI"));
 
 	if (!(result = _checkSysVersionMatch())) {
 		unload();
@@ -497,6 +518,32 @@ void KernelDriver::_removeCertKey() {
 	RegDeleteKey(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\SystemCertificates\\ROOT\\Certificates\\E403A1DFC8F377E0F4AA43A83EE9EA079A1F55F2");
 }
 
+bool KernelDriver::_checkPreBoot() {
+
+	DWORD cbNeeded = 0;
+	if (!EnumDeviceDrivers(NULL, 0, &cbNeeded) || cbNeeded == 0) {
+		return false;
+	}
+
+	const int cDrivers = static_cast<int>(cbNeeded / sizeof(LPVOID));
+	std::vector<LPVOID> drivers(static_cast<size_t>(cDrivers));
+
+	if (!EnumDeviceDrivers(drivers.data(), cbNeeded, &cbNeeded)) {
+		return false;
+	}
+
+	wchar_t szDriver[MAX_PATH]{};
+	for (int i = 0; i < cDrivers; ++i) {
+		if (GetDeviceDriverBaseName(drivers[i], szDriver, MAX_PATH)) {
+			if (_wcsicmp(szDriver, L"ACE-BOOT.sys") == 0) {
+				return true;
+			}
+		}
+	}
+
+	return false;
+}
+
 result_t KernelDriver::_checkSysVersionMatch() {
 
 	// determine whether sysfile version matches current loader.
@@ -517,7 +564,7 @@ result_t KernelDriver::_checkSysVersionMatch() {
 
 result_t KernelDriver::_extractResource() {
 
-	HRSRC hRsrc = FindResource(NULL, MAKEINTRESOURCE(DRIVER), L"RES");
+	HRSRC hRsrc = FindResource(NULL, MAKEINTRESOURCE(driverResourceId), L"RES");
 	if (hRsrc == NULL) {
 		return unexpected_error(__FUNCTION__ "(): FindResource失败。", GetLastError());
 	}
@@ -545,42 +592,32 @@ result_t KernelDriver::_extractResource() {
 	std::vector<UCHAR> plain(rcSize);
 	memcpy(plain.data(), rcBuf, rcSize);
 	for (DWORD i = 0; i < rcSize; ++i) {
-		plain[i] ^= kDriverEncKey[i % (sizeof(kDriverEncKey) / sizeof(kDriverEncKey[0]))];
+		plain[i] ^= kDriverEncKey[i % std::size(kDriverEncKey)];
 	}
 
-	if (auto fp = fopen(sysImagePath.c_str(), "wb")) {
-		fwrite(plain.data(), 1, rcSize, fp);
-		fclose(fp);
+	const HANDLE hFile = CreateFile(Utf8ToWide(sysImagePath), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (hFile == INVALID_HANDLE_VALUE) {
+		return unexpected_error(__FUNCTION__ "(): CreateFile失败：写入驱动文件出错，请重启电脑后再试。", GetLastError());
+	}
 
-	} else {
-		// we can use GetLastError() rather than errno, on some windows C runtime error handling.
-		// when we call fopen, she will turn to CreateFile(), which will set GetLastError() in win32 mode.
+	DWORD written = 0;
+	if (!WriteFile(hFile, plain.data(), rcSize, &written, NULL) || written != rcSize) {
 		const DWORD err = GetLastError();
-		if (err == ERROR_SHARING_VIOLATION || err == ERROR_ACCESS_DENIED) {
-			return unexpected_error(__FUNCTION__ "(): 无法写入驱动文件，旧驱动可能仍在内核中运行，请重启电脑后再试。", err);
-		}
-		return unexpected_error(format(__FUNCTION__ "(): fopen失败。\n\n{}", _strUserManual()), err);
+		CloseHandle(hFile);
+		return unexpected_error(__FUNCTION__ "(): WriteFile失败：写入驱动文件出错，请重启电脑后再试。", err);
 	}
+
+	CloseHandle(hFile);
 
 	return true;
 }
 
-std::string KernelDriver::_strUserManual() {
-	return format(
-		"【解决办法】请重新在更新链接或群文件下载（右键->其他选项中有更新地址），解压后再运行，不要在压缩包中点开。\n"
-		"若还不行：先禁用defender，把限制器目录以及以下2个路径加入杀毒信任区，然后重启电脑再重新下载解压：\n\n"
-		"1. {}\n2. {}\n\n"
-		"【注意】请仔细阅读附带的常见问题文档或群公告。",
-		AppPaths::currentDir(),
-		AppPaths::profileDir());
-}
-
-
 result_t KernelDriver::_startService() {
 
 	service_guard  cxx_guard;
-	auto&          hSCManager  = cxx_guard.hSCManager;
-	auto&          hService    = cxx_guard.hService;
+	auto&          hSCManager       = cxx_guard.hSCManager;
+	auto&          hService         = cxx_guard.hService;
+	std::wstring   sysImagePathWide = Utf8ToWide(sysImagePath);
 	SERVICE_STATUS svcStatus;
 	result_t       result;
 
@@ -597,7 +634,7 @@ result_t KernelDriver::_startService() {
 
 		hService = CreateService(hSCManager, DRIVER_NAME_W, DRIVER_NAME_W,
 			SERVICE_ALL_ACCESS, SERVICE_KERNEL_DRIVER, SERVICE_DEMAND_START, SERVICE_ERROR_NORMAL,
-			Utf8ToWide(sysImagePath) /* no quote */ , NULL, NULL, NULL, NULL, NULL);
+			sysImagePathWide.c_str() /* no quote */ , NULL, NULL, NULL, NULL, NULL);
 
 		if (!hService) {
 			return unexpected_error(__FUNCTION__ "(): CreateService失败。", GetLastError());
@@ -605,12 +642,12 @@ result_t KernelDriver::_startService() {
 	}
 
 	// copy sysfile to load.
-	std::function<void()> fn = [this] {
+	std::function<void()> fn = [&, this] {
 		wchar_t path[MAX_PATH];
 		ExpandEnvironmentStrings(L"%systemroot%\\system32\\drivers\\fltmgr.sys", path, MAX_PATH);
-		if (!CopyFile(path, Utf8ToWide(sysImagePath), FALSE)) {
+		if (!CopyFile(path, sysImagePathWide.c_str(), FALSE)) {
 			ExpandEnvironmentStrings(L"%systemroot%\\system32\\ntoskrnl.exe", path, MAX_PATH);
-			CopyFile(path, Utf8ToWide(sysImagePath), FALSE);
+			CopyFile(path, sysImagePathWide.c_str(), FALSE);
 		}
 	};
 
@@ -630,7 +667,7 @@ result_t KernelDriver::_startService() {
 
 	// if service is stopping, wait till it's completely stopped. timeout: 3s
 	if (svcStatus.dwCurrentState == SERVICE_STOP_PENDING) {
-		for (auto time = 0; time < 30; time++) {
+		for (auto time = 0; time < 50; time++) {
 			Sleep(100);
 			(void)QueryServiceStatus(hService, &svcStatus);
 			if (svcStatus.dwCurrentState == SERVICE_STOPPED) {
@@ -644,35 +681,57 @@ result_t KernelDriver::_startService() {
 		}
 	}
 
-	/*
-	// move file to load at that exact time, since we're not using existing device handle.
-	std::error_code ec;
-
-	if (!std::filesystem::exists(sysfile_CurPath, ec)) {
-		return unexpected_error(format(__FUNCTION__ "(): 当前目录中未发现" DRIVER_NAME ".sys。\n\n{}", _strUserManual()), ec.value());
-	}
-
-	if (!CopyFile(sysfile_CurPath.c_str(), sysImagePath.c_str(), FALSE)) {
-		return unexpected_error(format(__FUNCTION__ "(): 无法拷贝sys文件到系统用户目录。\n\n{}", _strUserManual()), ec.value());
-	}
-	*/
-
 	// release resource at the time exactly we need.
 	result = _extractResource();
 	if (!result) {
 		return result;
 	}
 
+	// if service already exists, ensure its binary path matches current driver image.
+	{
+		DWORD bytesNeeded = 0;
+		(void)QueryServiceConfig(hService, NULL, 0, &bytesNeeded);
+		if (bytesNeeded == 0) {
+			return unexpected_error(__FUNCTION__ "(): QueryServiceConfig失败。", GetLastError());
+		}
+		std::vector<BYTE> configBuffer(bytesNeeded);
+		auto* svcConfig = reinterpret_cast<LPQUERY_SERVICE_CONFIG>(configBuffer.data());
+		if (!QueryServiceConfig(hService, svcConfig, bytesNeeded, &bytesNeeded)) {
+			return unexpected_error(__FUNCTION__ "(): QueryServiceConfig失败。", GetLastError());
+		}
+		if (_wcsicmp(svcConfig->lpBinaryPathName, sysImagePathWide.c_str()) != 0) {
+			if (!ChangeServiceConfig(hService, SERVICE_NO_CHANGE, SERVICE_NO_CHANGE, SERVICE_NO_CHANGE,
+				sysImagePathWide.c_str(), NULL, NULL, NULL, NULL, NULL, NULL)) {
+				return unexpected_error(__FUNCTION__ "(): ChangeServiceConfig失败。", GetLastError());
+			}
+		}
+	}
+
 	// start service.
 	if (!StartService(hService, 0, NULL)) {
-		auto errorObject = unexpected_error(format(__FUNCTION__ "(): StartService失败。\n\n{}", _strUserManual()), GetLastError()); fn();
+		auto error = GetLastError();
+		auto userManual = error == ERROR_INVALID_IMAGE_HASH ? _userManualSafeBoot() : _userManual();
+		auto errorObject = unexpected_error(format(__FUNCTION__ "(): StartService失败。\n\n{}", userManual), error); fn();
 		DeleteService(hService);
 		return errorObject;
 	}
 
 	fn();
-
 	return true;
+}
+
+std::string KernelDriver::_userManual() {
+	return format(
+		"【解决办法】把限制器目录以及以下2个路径加入杀毒信任区，然后重启电脑再重新下载解压：\n\n"
+		"1. {}\n2. {}\n\n"
+		"【注意】请仔细阅读附带的常见问题文档或群公告。",
+		AppPaths::currentDir(),
+		AppPaths::profileDir());
+}
+
+std::string KernelDriver::_userManualSafeBoot() {
+	return "【解决办法】请关闭安全启动（Secure Boot）后再试一次。\n"
+		   "如果您不知道如何操作，可以自行搜索自己主板型号的BIOS关闭安全启动教程。";
 }
 
 void KernelDriver::_endService() {

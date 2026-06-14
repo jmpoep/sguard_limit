@@ -1,7 +1,6 @@
 #include <Windows.h>
-#include <cstring>
+#include <Shlwapi.h>
 #include <filesystem>
-#include <system_error>
 #include "app_paths.h"
 #include "string_conv.h"
 
@@ -19,30 +18,33 @@ std::string profileDir() {
 		return cached;
 	}
 
-	wchar_t profilePath[MAX_PATH] = {};
-	const std::string envSubPath = std::string("%appdata%\\") + appName();
+	const std::wstring envSubPathWide    = L"%appdata%\\" + std::wstring(appNameWide());
+	const std::wstring fallBackPathWide  = L"C:\\" + std::wstring(appNameWide());
 
-	if (!ExpandEnvironmentStrings(Utf8ToWide(envSubPath), profilePath, MAX_PATH)) {
-		cached = std::string("C:\\") + appName();
+	std::wstring profilePathWide;
+
+	wchar_t buffer[MAX_PATH] = {};
+	if (ExpandEnvironmentStrings(envSubPathWide.c_str(), buffer, MAX_PATH)) {
+		profilePathWide = buffer;
 	} else {
-		cached = WideToUtf8(profilePath);
+		profilePathWide = fallBackPathWide;
 	}
 
 	std::error_code ec;
-
-	if (!fs::is_directory(cached, ec)) {
-		if (!fs::create_directory(cached, ec)) {
-			cached = std::string("C:\\") + appName();
-			if (!fs::is_directory(cached, ec)) {
-				fs::create_directory(cached, ec);
+	if (!fs::is_directory(profilePathWide, ec)) {
+		if (!fs::create_directory(profilePathWide, ec)) {
+			profilePathWide = fallBackPathWide;
+			if (!fs::is_directory(profilePathWide, ec)) {
+				fs::create_directory(profilePathWide, ec);
 			}
 		}
 	}
 
-	if (!fs::is_directory(cached, ec)) {
-		cached.clear();
+	if (!fs::is_directory(profilePathWide, ec)) {
+		return {};
 	}
 
+	cached = WideToUtf8(profilePathWide);
 	return cached;
 }
 
@@ -55,13 +57,15 @@ std::string currentDir() {
 	}
 
 	wchar_t path[MAX_PATH] = {};
-	GetModuleFileName(NULL, path, MAX_PATH);
-
-	if (auto p = wcsrchr(path, L'\\')) {
-		*p = L'\0';
-		cached = WideToUtf8(path);
+	if (GetModuleFileName(NULL, path, MAX_PATH) == 0) {
+		return {};
 	}
 
+	if (!PathRemoveFileSpec(path)) {
+		return {};
+	}
+
+	cached = WideToUtf8(path);
 	return cached;
 }
 

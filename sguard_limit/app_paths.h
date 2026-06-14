@@ -4,7 +4,8 @@
 
 namespace AppPaths {
 
-inline constexpr const char* appName() { return "Hutao"; }
+constexpr const char*    appName() { return "Hutao"; }
+constexpr const wchar_t* appNameWide() { return L"Hutao"; }
 
 // Returns profile directory (%appdata%\Hutao). Creates if missing.
 std::string profileDir();

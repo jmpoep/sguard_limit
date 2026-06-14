@@ -10,6 +10,8 @@
 #include "win32utility.h"  // tiny::format
 #include "transproxy.h"
 
+#include "app_paths.h"
+
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "bcrypt.lib")
 
@@ -247,21 +249,21 @@ void ProxyManager::disable() {
 
 result_t ProxyManager::_installDllFile(bool& needReboot) {
 
-	// 获取当前目录和profile目录下的dll路径 curPath profilePath
-	wchar_t curPath[MAX_PATH];
-	GetModuleFileName(NULL, curPath, MAX_PATH);
-	if (PathRemoveFileSpec(curPath)) {
-		PathAppend(curPath, L"\\vsocks.dll");
-	}
-	else {
+	const std::string currentDir = AppPaths::currentDir();
+	if (currentDir.empty()) {
 		return unexpected_error(__FUNCTION__ "(): 获取当前目录失败。", GetLastError());
 	}
 
-	wchar_t profilePath[MAX_PATH];
-	ExpandEnvironmentStrings(L"%appdata%\\Hutao\\vsocks.dll", profilePath, MAX_PATH);
+	const std::string profileDir = AppPaths::profileDir();
+	if (profileDir.empty()) {
+		return unexpected_error(__FUNCTION__ "(): 获取用户目录失败。", GetLastError());
+	}
+
+	const std::wstring curDllPathWide = Utf8ToWide(currentDir + "\\vsocks.dll");
+	const std::wstring profileDllPathWide = Utf8ToWide(profileDir + "\\vsocks.dll");
 
 	// 如果当前目录和profile目录都没有dll，检查系统目录，如果有dll，直接复用，不再拷贝；没有则报错
-	if (!_fileExists(curPath) && !_fileExists(profilePath)) {
+	if (!_fileExists(curDllPathWide.c_str()) && !_fileExists(profileDllPathWide.c_str())) {
 		if (!_fileExists(sysDllPath)) {
 			return unexpected_error(__FUNCTION__ "(): 没有找到vsocks.dll，建议重新解压再运行（不要在压缩包里点开）", ERROR_FILE_NOT_FOUND);
 		}
@@ -269,18 +271,18 @@ result_t ProxyManager::_installDllFile(bool& needReboot) {
 	}
 
 	// 尝试拷贝当前目录dll到profile目录
-	if (_fileExists(curPath)) {
-		if (!MoveFileEx(curPath, profilePath, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)) {
+	if (_fileExists(curDllPathWide.c_str())) {
+		if (!MoveFileEx(curDllPathWide.c_str(), profileDllPathWide.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)) {
 			return unexpected_error(__FUNCTION__ "(): MoveFileW失败：无法拷贝vsocks.dll，请检查是否被杀毒拦截。", GetLastError());
 		}
 	}
 
 	// 尝试拷贝profile目录dll到系统目录
-	if (_fileExists(profilePath)) {
+	if (_fileExists(profileDllPathWide.c_str())) {
 
 		// 如果系统目录没dll 或者系统目录的dll内容不一致 则尝试拷贝 拷贝成功就继续 失败则报错并提示用户重启
-		if (!_fileExists(sysDllPath) || !_filesContentEqual(profilePath, sysDllPath)) {
-			if (!CopyFile(profilePath, sysDllPath, FALSE)) {
+		if (!_fileExists(sysDllPath) || !_filesContentEqual(profileDllPathWide.c_str(), sysDllPath)) {
+			if (!CopyFile(profileDllPathWide.c_str(), sysDllPath, FALSE)) {
 				const DWORD err = GetLastError();
 				if (err == ERROR_SHARING_VIOLATION || err == ERROR_ACCESS_DENIED) {
 					needReboot = true;

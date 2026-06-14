@@ -74,57 +74,54 @@ void HijackThreadWorker() {
 
 bool AutoLoadDriverOrProxy() {
 
-	auto setProxyMode = [](bool enable) {
-		const DWORD newMode = enable ? 3 : 2;
-		if (systemMgr.mode.load() == newMode) {
-			return;
-		}
-		systemMgr.mode = newMode;
+	auto setModeToProxy = [] {
+		systemMgr.mode = 3;
+		systemMgr.writeConfig();
+	};
+	
+	auto setModeToPatch = [] {
+		systemMgr.mode = 2;
 		systemMgr.writeConfig();
 	};
 
-	auto loadProxyOrQuit = []() -> bool {
-		return proxyMgr.load();
+	auto onDriverLoadable = [&] {
+		setModeToPatch();
+		if (proxyMgr.checkProxyLoaded() && !proxyMgr.checkFileInstalled()) {
+			proxyMgr.uninstallProxy();
+			systemMgr.log("orphan proxy without dll, cleaned");
+
+		}
+		else if (proxyMgr.checkFileInstalled() && proxyMgr.checkProxyLoaded()) {
+			// silent if only file exists.
+			proxyMgr.uninstallProxy();
+			systemMgr.log("user installed proxy, but not necessary, uninstalled.");
+			systemMgr.messageBox("你安装了透明代理，但现在无需开启此功能，已经自动关闭。\n"
+				"你可以随时在右下角托盘菜单中选择“配置透明代理”来卸载它。（需重启电脑以完全卸载）");
+		}
 	};
 
-	auto promptEnableProxyOrQuit = [&]() -> bool {
+	auto promptEnableProxy = [&]() -> bool {
 		if (proxyMgr.checkFileInstalled() && proxyMgr.checkProxyLoaded()) {
-			setProxyMode(true);
 			systemMgr.log("user already installed proxy, continue");
+			setModeToProxy();
 			return true;
 		}
 		if (systemMgr.messageBoxYesNo("驱动加载失败，需要启用透明代理才可以正常使用。你要启用该功能吗？\n\n"
 		                              "【注意】透明代理和一些外服反作弊冲突（如吃鸡、apex等），玩这些游戏的时候关掉限制器或者卸载透明代理即可！")) {
 			systemMgr.log("user selected to install proxy");
-			setProxyMode(true);
+			setModeToProxy();
 			return true;
 
 		} else {
-			systemMgr.log("user selected not install proxy, quit");
+			systemMgr.log("user selected not install proxy, quit.");
 			return false;
 		}
-	};
-
-	auto onDriverLoadable = [&]() -> bool {
-		setProxyMode(false);
-		if (proxyMgr.checkProxyLoaded() && !proxyMgr.checkFileInstalled()) {
-			proxyMgr.uninstallProxy();
-			systemMgr.log("orphan proxy without dll, cleaned");
-
-		} else if (proxyMgr.checkFileInstalled() && proxyMgr.checkProxyLoaded()) {
-			// silent if only file exists.
-			proxyMgr.uninstallProxy();
-			systemMgr.log("user installed proxy, but not necessary, uninstalled.");
-			systemMgr.messageBox("你安装了透明代理，但现在无需开启此功能，已经自动关闭。\n"
-				                 "你可以随时在右下角托盘菜单中选择“配置透明代理”来卸载它。（需重启电脑以完全卸载）");
-		}
-		return true;
 	};
 
 	// if not first run: check mode==3 (proxy).
 	// > if mode==3: do not try to load driver. load proxy only
 	if (!systemMgr.isFirstRun && systemMgr.mode == 3) {
-		return loadProxyOrQuit();
+		return proxyMgr.load();
 	}
 
 	// if first run OR mode==2: try load driver.
@@ -133,14 +130,12 @@ bool AutoLoadDriverOrProxy() {
 	//   > if user select use proxy: record to config (mode=3), do not try to load driver anymore.
 	//   > if user select not use: quit program.
 	if (driver.checkLoadable()) {
-		if (!onDriverLoadable()) {
-			return false;
-		}
+		onDriverLoadable();
 	} else {
-		if (!promptEnableProxyOrQuit()) {
+		if (!promptEnableProxy()) {
 			return false;
 		}
-		if (!loadProxyOrQuit()) {
+		if (!proxyMgr.load()) {
 			return false;
 		}
 	}
@@ -150,10 +145,10 @@ bool AutoLoadDriverOrProxy() {
 
 }
 
-INT WINAPI WinMain(
+INT WINAPI wWinMain(
 	_In_ HINSTANCE hInstance,
 	_In_opt_ HINSTANCE hPrevInstance,
-	_In_ LPSTR lpCmdLine,
+	_In_ LPWSTR lpCmdLine,
 	_In_ int nShowCmd) {
 
 
@@ -199,11 +194,8 @@ INT WINAPI WinMain(
 			"【更新说明】\n\n"
 			" 内存补丁 " MEMPATCH_VERSION "：\n\n"
 			"1. 驱动已兼容至Win11 26H1的系统内核 (Build 28020.2207)。\n"
-			"2. 内部全链路改为Unicode，避免非简中系统乱码并兼容特殊符号路径。\n"
-			"3. 优化限制器弹窗交互过多的问题。\n"
-			"4. 修复部分情况下压不住的问题。\n"
-			"5. 修复部分电脑提示兼容问题弹窗。\n"
-			"6. 优化限制器的线程同步和优雅退出逻辑。\n\n\n"
+			"2. 修复不兼容中文系统用户名的问题。\n"
+			"3. 自动适配安全启动问题和其他优化。\n\n\n"
 
 			"【重要提示】\n\n"
 			"1. 关注【B站】@H3d9 防迷路，有问题会在动态更新。\n\n"
